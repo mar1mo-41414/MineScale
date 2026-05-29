@@ -47,6 +47,9 @@ pub async fn run_with_config(config: JoinConfig) -> Result<()> {
         telemetry::Role::Join,
         config.app_kind,
     );
+    // Join already knows the room_id (it's in the share URL), so we set
+    // it BEFORE the start event — every join event carries the pairing key.
+    report.set_room(&coord::parse_room_id(&config.target));
     if config.telemetry {
         let d = diag::run().await;
         report.set_network(d.nat_type.label(), d.ipv6_available);
@@ -71,7 +74,6 @@ async fn run_inner(
     report: &mut telemetry::Reporter,
 ) -> Result<()> {
     let room_id = coord::parse_room_id(&config.target);
-    report.set_room(&room_id);
 
     // ── 1. Keypair ────────────────────────────────────────────────────────────
     let keypair    = crypto::Keypair::generate();
@@ -89,6 +91,7 @@ async fn run_inner(
         &room_id,
         coord::JoinRoomRequest { join_pubkey: pubkey_b64, join_stun: external_addr.to_string() },
     ).await?;
+    report.send_event(telemetry::Phase::Registered).await;
 
     // ── 4. Hole punch ─────────────────────────────────────────────────────────
     println!("  … Establishing P2P connection…");
@@ -107,8 +110,19 @@ async fn run_inner(
     // ── 7. QUIC tunnel ────────────────────────────────────────────────────────
     // on_connected fires INSIDE run_join, after QUIC is established and the
     // TCP listener is bound — guaranteeing Minecraft won't see Connection refused.
+    // We chain a telemetry checkpoint into it so the `connected` event is
+    // recorded the moment the tunnel is usable — even if the user kills
+    // the window without a clean disconnect.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
-    let on_connected = config.on_connected.take();
+    let user_on_connected = config.on_connected.take();
+    let report_for_cb = report.clone();
+    let on_connected: Option<Box<dyn FnOnce(u16) + Send>> =
+        Some(Box::new(move |port: u16| {
+            if let Some(cb) = user_on_connected { cb(port); }
+            tokio::spawn(async move {
+                report_for_cb.send_event(telemetry::Phase::Connected).await;
+            });
+        }));
     let cancel = config.cancel.clone();
 
     tokio::select! {

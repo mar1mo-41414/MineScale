@@ -219,7 +219,8 @@ MC_SHARE_TELEMETRY=1 ./mc-share-gui
 | `session_id` | ランダム 16 文字 | 同一セッション内の start/result を紐付け（永続化なし） |
 | `room_id` | 共有 URL の末尾 | host と join のペアリング（部屋自体は 15 分で消えます） |
 | `role` | `host` / `join` | どちら側か |
-| `outcome` | `success` / `stun_failed` / `punch_failed` / `tls_failed` / ... | 成否カテゴリ |
+| `phase` | `start` / `registered` / `connected` / `result` | 進捗マイルストーン（各イベント直後に送信） |
+| `outcome` | `success` / `stun_failed` / `punch_failed` / `tls_failed` / ... | 成否カテゴリ（`result` のみ） |
 | `duration_ms` | `3421` | 開始から結果までの所要時間 |
 | `nat_type` | `Cone NAT (P2P ready)` 等 | NAT 種別（診断パネルと同じ判定） |
 | `ipv6_available` | `true` / `false` | IPv6 経路の有無 |

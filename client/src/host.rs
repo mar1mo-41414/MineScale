@@ -103,6 +103,7 @@ async fn run_inner(
     }).await?;
 
     report.set_room(&room.room_id);
+    report.send_event(telemetry::Phase::Registered).await;
     print_share_link(&room.share_url);
     if let Some(cb) = config.on_share_url.take() {
         cb(room.share_url.clone());
@@ -118,6 +119,7 @@ async fn run_inner(
     // ── 6. Hole punch with first joiner ───────────────────────────────────────
     let first_addr: std::net::SocketAddr = first_peer.join_stun.parse()?;
     tunnel::punch_holes(&udp_socket, first_addr).await?;
+    report.send_event(telemetry::Phase::Connected).await;
 
     // ── 7. Start QUIC server ──────────────────────────────────────────────────
     let mc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", mc_port).parse()?;

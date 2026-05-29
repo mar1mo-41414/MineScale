@@ -29,7 +29,18 @@ pub enum AppKind { Cli, Gui }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Phase { Start, Result }
+pub enum Phase {
+    /// Network snapshot taken; process is up.
+    Start,
+    /// Coordination Server has accepted the room (room_id known).
+    Registered,
+    /// First peer reached over QUIC (host) or QUIC + local TCP up (join).
+    /// Past this point a connection actually exists, even if the user
+    /// later kills the window without cleanly disconnecting.
+    Connected,
+    /// Final, terminal event with an outcome and total duration.
+    Result,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -46,6 +57,7 @@ pub enum Outcome {
 
 #[derive(Clone)]
 pub struct Reporter {
+    // (See helpers below.)
     pub enabled: bool,
     pub base_url: String,
     pub session_id: String,
@@ -85,9 +97,14 @@ impl Reporter {
         self.ipv6_available = Some(ipv6);
     }
 
-    pub async fn send_start(&self) {
+    pub async fn send_start(&self) { self.send_event(Phase::Start).await; }
+
+    /// Mid-session checkpoint (room registered / connection established).
+    /// Each milestone is sent immediately so we have data even if the
+    /// process is killed without a clean shutdown.
+    pub async fn send_event(&self, phase: Phase) {
         if !self.enabled { return; }
-        let body = self.base_payload(Phase::Start, None, None);
+        let body = self.base_payload(phase, None, None);
         Self::post(&self.base_url, body).await;
     }
 
