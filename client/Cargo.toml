@@ -21,7 +21,7 @@ base64             = { workspace = true }
 bytes              = { workspace = true }
 
 clap     = { version = "4",    features = ["derive", "env"] }
-reqwest  = { version = "0.12", features = ["json"] }
+reqwest  = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # Cryptography
 x25519-dalek      = { version = "2",    features = ["static_secrets"] }
