@@ -24,6 +24,19 @@ impl<S: tracing::Subscriber> Layer<S> for GuiLayer {
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
+        let meta = event.metadata();
+
+        // Only capture events from our own crates at INFO level or above.
+        // This silences internal eframe / winit / egui / quinn debug events.
+        if !meta.target().starts_with("mc_share") {
+            return;
+        }
+        if !matches!(*meta.level(),
+            tracing::Level::ERROR | tracing::Level::WARN | tracing::Level::INFO)
+        {
+            return;
+        }
+
         struct V(String);
         impl tracing::field::Visit for V {
             fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
@@ -39,7 +52,7 @@ impl<S: tracing::Subscriber> Layer<S> for GuiLayer {
         event.record(&mut v);
         if v.0.is_empty() { return; }
 
-        let level = match *event.metadata().level() {
+        let level = match *meta.level() {
             tracing::Level::ERROR => LogLevel::Error,
             tracing::Level::WARN  => LogLevel::Warn,
             _                     => LogLevel::Info,
