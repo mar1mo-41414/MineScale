@@ -36,7 +36,7 @@ pub async fn announce_lan_world(motd: &str, port: u16) -> Result<()> {
 /// Returns the first port found within `timeout`, or `None`.
 pub async fn detect_lan_world(timeout: Duration) -> Option<u16> {
     let socket =
-        UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MULTICAST_PORT)).ok()?;
+        UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MULTICAST_PORT)).await.ok()?;
     socket
         .join_multicast_v4(MULTICAST_ADDR, Ipv4Addr::UNSPECIFIED)
         .ok()?;

@@ -109,6 +109,7 @@ fn build_client_endpoint(
 
 // ── Certificate pinning verifier ─────────────────────────────────────────────
 
+#[derive(Debug)]
 struct PinnedCertVerifier(Vec<u8>);
 
 impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
