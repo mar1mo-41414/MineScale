@@ -36,7 +36,9 @@ pub async fn run(args: JoinArgs) -> Result<()> {
 
     // ── 5. Resolve local port ─────────────────────────────────────────────────
     let local_port = resolve_local_port(args.port).await?;
-    let local_addr: std::net::SocketAddr = format!("127.0.0.1:{}", local_port).parse()?;
+    // Bind on all interfaces so Minecraft can reach us via the LAN IP
+    // that the multicast announcement will carry as its source address.
+    let local_addr: std::net::SocketAddr = format!("0.0.0.0:{}", local_port).parse()?;
 
     // ── 6. Announce as LAN world ──────────────────────────────────────────────
     let motd = "MineScale World";
@@ -52,12 +54,12 @@ pub async fn run(args: JoinArgs) -> Result<()> {
 async fn resolve_local_port(preferred: u16) -> Result<u16> {
     if preferred != 0 {
         // Try the preferred port first
-        if let Ok(l) = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", preferred)).await {
+        if let Ok(l) = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", preferred)).await {
             return Ok(l.local_addr()?.port());
         }
     }
     // Fall back to a random port
-    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let l = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     Ok(l.local_addr()?.port())
 }
 
