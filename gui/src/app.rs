@@ -92,6 +92,9 @@ pub struct App {
     share_url:  String,
     local_port: u16,
 
+    /// When the host room expires (15 min after share URL appears).
+    room_expires_at: Option<std::time::Instant>,
+
     // ── log ──────────────────────────────────────────────────────────────────
     log: Arc<Mutex<Vec<LogEntry>>>,
 
@@ -112,6 +115,7 @@ impl App {
             local_port_cell: Arc::new(Mutex::new(None)),
             share_url:  String::new(),
             local_port: 0,
+            room_expires_at: None,
             log,
             cancel: None,
         }
@@ -126,8 +130,9 @@ impl App {
     }
 
     fn reset_outputs(&mut self) {
-        self.share_url  = String::new();
-        self.local_port = 0;
+        self.share_url       = String::new();
+        self.local_port      = 0;
+        self.room_expires_at = None;
         if let Ok(mut c) = self.share_url_cell.lock()  { *c = None; }
         if let Ok(mut c) = self.local_port_cell.lock() { *c = None; }
     }
@@ -215,7 +220,14 @@ impl App {
     fn poll_cells(&mut self) {
         if self.share_url.is_empty() {
             if let Ok(c) = self.share_url_cell.lock() {
-                if let Some(u) = c.as_ref() { self.share_url = u.clone(); }
+                if let Some(u) = c.as_ref() {
+                    self.share_url = u.clone();
+                    // Start the 15-minute room expiry countdown.
+                    self.room_expires_at = Some(
+                        std::time::Instant::now()
+                            + std::time::Duration::from_secs(15 * 60),
+                    );
+                }
             }
         }
         if self.local_port == 0 {
@@ -274,6 +286,30 @@ impl App {
                 }
             });
             ui.small("Multiple friends can join with the same link.");
+
+            // ── Room expiry countdown ────────────────────────────────────────
+            if let Some(expires_at) = self.room_expires_at {
+                let now = std::time::Instant::now();
+                if now < expires_at {
+                    let rem = expires_at - now;
+                    let mins = rem.as_secs() / 60;
+                    let secs = rem.as_secs() % 60;
+                    let color = if rem.as_secs() < 60 {
+                        Color32::from_rgb(255, 160, 50)  // orange: last minute
+                    } else {
+                        Color32::from_gray(160)
+                    };
+                    ui.horizontal(|ui| {
+                        ui.colored_label(color,
+                            format!("⏱  New joiners accepted for {:02}:{:02}", mins, secs));
+                    });
+                } else {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 80, 80),
+                        "⏱  Room expired — new joiners cannot connect (existing players stay connected)",
+                    );
+                }
+            }
         }
     }
 
