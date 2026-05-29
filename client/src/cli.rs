@@ -26,7 +26,7 @@ pub struct HostArgs {
     pub port: u16,
 
     /// Coordination server URL
-    #[arg(long, env = "MCSHARE_COORD", default_value = "https://coord.minescale.example.com")]
+    #[arg(long, env = "MCSHARE_COORD", default_value = "https://mcs.markund.f5.si")]
     pub coord_url: String,
 
     /// STUN server for NAT traversal
@@ -44,7 +44,7 @@ pub struct JoinArgs {
     pub port: u16,
 
     /// Coordination server URL
-    #[arg(long, env = "MCSHARE_COORD", default_value = "https://coord.minescale.example.com")]
+    #[arg(long, env = "MCSHARE_COORD", default_value = "https://mcs.markund.f5.si")]
     pub coord_url: String,
 
     /// STUN server for NAT traversal

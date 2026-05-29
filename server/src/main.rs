@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
 
     let app = Router::new()
         .route("/api/v1/rooms", post(api::create_room))
-        .route("/api/v1/rooms/:room_id/peer", get(api::poll_peer))
+        .route("/api/v1/rooms/:room_id/peers", get(api::poll_peers))
         .route("/api/v1/rooms/:room_id/join", post(api::join_room))
         .route("/healthz", get(health))
         .layer(TraceLayer::new_for_http())

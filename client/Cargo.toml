@@ -8,6 +8,10 @@ description = "Minecraft Java Edition P2P World Sharing — no port forwarding, 
 name = "mc-share"
 path = "src/main.rs"
 
+[lib]
+name = "mc_share"
+path = "src/lib.rs"
+
 [dependencies]
 tokio              = { workspace = true }
 serde              = { workspace = true }
@@ -35,4 +39,5 @@ rustls  = { version = "0.23", default-features = false, features = ["ring", "std
 rcgen   = "0.13"
 
 # Low-level UDP
-socket2 = { version = "0.5", features = ["all"] }
+socket2    = { version = "0.5", features = ["all"] }
+tokio-util = { version = "0.7", features = ["rt"] }

@@ -16,21 +16,24 @@ const PROBE_MAGIC: &[u8] = b"MCS\x01";
 const HOLE_PUNCH_TIMEOUT: Duration = Duration::from_secs(20);
 const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-// After we receive the peer's first probe, we keep sending our own probes for
-// this long before handing the socket to QUIC.
-//
-// Why: when the host receives the joiner's probe it immediately had a hole open,
-// but the joiner's NAT may not yet have seen a probe *from* the host.
-// Without this grace period the host stops sending probes the moment it gets
-// the first one back, so the joiner times out.
+// After receiving the first probe, keep sending for this long before handing
+// off to QUIC.  Ensures the remote side receives our probes too.
 const GRACE_AFTER_RECEIVE: Duration = Duration::from_millis(2500);
 
-/// UDP hole punching — sends probes to `peer` and waits to receive one back.
-/// After receiving the first probe a grace period keeps probes flowing so the
-/// remote side also has time to receive ours before we hand off the socket.
+// If no probe is received within this window, proceed anyway.
+// Handles 2nd+ joiners where the host is already in QUIC mode and won't
+// reply with raw probes — the joiner still needs to open its own NAT hole.
+const BEST_EFFORT_SEND: Duration = Duration::from_secs(3);
+
+/// UDP hole punching.
+///
+/// - Normal path: receives a probe back, then sends for GRACE_AFTER_RECEIVE.
+/// - Best-effort path: after BEST_EFFORT_SEND without any response, proceeds
+///   anyway so that 2nd+ joiners (whose host is in QUIC mode) still work.
 pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
     info!("Hole punching to {}…", peer);
 
+    let start = tokio::time::Instant::now();
     let mut probe_interval = tokio::time::interval(PROBE_INTERVAL);
     probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut recv_buf = [0u8; 64];
@@ -48,25 +51,26 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
                         {
                             if grace_deadline.is_none() {
                                 info!("Hole punched! Got probe from {} — entering grace period", src);
-                                grace_deadline = Some(
-                                    tokio::time::Instant::now() + GRACE_AFTER_RECEIVE,
-                                );
+                                grace_deadline = Some(tokio::time::Instant::now() + GRACE_AFTER_RECEIVE);
                             }
                         }
-                        Ok(_) => {} // spurious packet (e.g. STUN residual)
+                        Ok(_) => {}
                         Err(e) => return Err(anyhow!(e)),
                     }
                 }
                 _ = probe_interval.tick() => {
                     let _ = socket.send_to(PROBE_MAGIC, peer).await;
-                    debug!("Sent probe to {}", peer);
-                    // Only exit after the grace period has elapsed so the peer
-                    // has time to receive our probes before we stop sending.
+                    let now = tokio::time::Instant::now();
                     if let Some(dl) = grace_deadline {
-                        if tokio::time::Instant::now() >= dl {
+                        if now >= dl {
                             info!("Grace period complete — proceeding to QUIC");
                             return Ok(());
                         }
+                    } else if now.duration_since(start) >= BEST_EFFORT_SEND {
+                        // No response yet but we've been sending long enough to
+                        // open our NAT — proceed optimistically.
+                        info!("No probe received — proceeding in best-effort mode");
+                        return Ok(());
                     }
                 }
             }
@@ -74,6 +78,21 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
     })
     .await
     .map_err(|_| anyhow!("Hole punching timed out after {}s", HOLE_PUNCH_TIMEOUT.as_secs()))?
+}
+
+/// Send a burst of probes from a *temporary* socket to open the host's NAT
+/// for a new joiner's IP.  Called for 2nd+ joiners while QUIC is running.
+pub async fn warm_up_hole(joiner_addr: SocketAddr) {
+    match UdpSocket::bind("0.0.0.0:0").await {
+        Ok(sock) => {
+            for _ in 0..25 {
+                let _ = sock.send_to(PROBE_MAGIC, joiner_addr).await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            debug!("Warm-up hole punching done for {}", joiner_addr);
+        }
+        Err(e) => warn!("warm_up_hole bind failed: {}", e),
+    }
 }
 
 // ── QUIC endpoint builders ────────────────────────────────────────────────────

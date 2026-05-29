@@ -1,5 +1,3 @@
-//! In-memory room registry with automatic expiry.
-
 use dashmap::DashMap;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -9,23 +7,18 @@ use tokio::time::interval;
 use tracing::info;
 
 const ROOM_ID_CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-const ROOM_EXPIRY: Duration = Duration::from_secs(15 * 60); // 15 minutes
-
-// ── Data model ────────────────────────────────────────────────────────────────
+const ROOM_EXPIRY: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone, Debug)]
 pub struct Room {
     pub room_id: String,
     pub host_token: String,
     pub relay_token: String,
-    /// Host X25519 public key (base64)
     pub host_pubkey: String,
-    /// Host external IP:port (STUN result)
     pub host_stun: String,
-    /// SHA-256 fingerprint of host's QUIC TLS cert (base64)
     pub cert_fingerprint: String,
-    /// Joiner info — populated when a joiner calls /join
-    pub peer: Option<PeerInfo>,
+    /// All joiners so far; index = position in this vec.
+    pub peers: Vec<PeerInfo>,
     pub created_at: Instant,
 }
 
@@ -34,8 +27,6 @@ pub struct PeerInfo {
     pub join_pubkey: String,
     pub join_stun: String,
 }
-
-// ── Registry ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Default)]
 pub struct Registry(Arc<DashMap<String, Room>>);
@@ -55,14 +46,25 @@ impl Registry {
         self.0.get(room_id).map(|r| r.clone())
     }
 
-    /// Set the joiner peer info; returns false if room not found.
-    pub fn set_peer(&self, room_id: &str, peer: PeerInfo) -> bool {
-        if let Some(mut entry) = self.0.get_mut(room_id) {
-            entry.peer = Some(peer);
-            true
-        } else {
-            false
-        }
+    /// Append a new joiner; returns the 0-based index of the new peer.
+    pub fn add_peer(&self, room_id: &str, peer: PeerInfo) -> Option<usize> {
+        self.0.get_mut(room_id).map(|mut entry| {
+            let idx = entry.peers.len();
+            entry.peers.push(peer);
+            idx
+        })
+    }
+
+    /// Return peers whose index is >= from_idx.
+    pub fn get_peers_from(&self, room_id: &str, from_idx: usize) -> Option<Vec<(usize, PeerInfo)>> {
+        self.0.get(room_id).map(|r| {
+            r.peers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i >= from_idx)
+                .map(|(i, p)| (i, p.clone()))
+                .collect()
+        })
     }
 
     pub fn remove(&self, room_id: &str) {
@@ -88,8 +90,6 @@ impl Registry {
     }
 }
 
-// ── Token / ID generation ─────────────────────────────────────────────────────
-
 pub fn generate_room_id() -> String {
     let mut rng = rand::thread_rng();
     (0..6)
@@ -97,7 +97,6 @@ pub fn generate_room_id() -> String {
         .collect()
 }
 
-/// 128-bit URL-safe token, no padding.
 pub fn generate_token() -> String {
     use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
     let bytes: [u8; 16] = rand::thread_rng().gen();

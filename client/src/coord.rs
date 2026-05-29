@@ -1,15 +1,14 @@
-//! HTTP client for the coordination server API.
-
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
-// ── Request / Response types (shared with server) ────────────────────────────
+// ── Shared types ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
 pub struct CreateRoomRequest {
-    pub host_pubkey: String,        // base64(X25519 pubkey)
-    pub host_stun: String,          // "ip:port"
-    pub cert_fingerprint: String,   // base64(SHA-256 of DER cert)
+    pub host_pubkey: String,
+    pub host_stun: String,
+    pub cert_fingerprint: String,
 }
 
 #[derive(Deserialize)]
@@ -36,15 +35,22 @@ pub struct JoinRoomResponse {
     pub relay_addr: String,
 }
 
-/// Returned by `wait_for_peer` when a joiner has registered.
-#[derive(Deserialize)]
-pub struct PeerInfo {
+/// A joiner with its 0-based index in the room's peer list.
+#[derive(Deserialize, Clone, Debug)]
+pub struct IndexedPeer {
+    pub idx: usize,
     pub join_pubkey: String,
     pub join_stun: String,
 }
 
+#[derive(Deserialize)]
+struct PollPeersResponse {
+    pub peers: Vec<IndexedPeer>,
+}
+
 // ── Client ────────────────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct Client {
     base_url: String,
     http: reqwest::Client,
@@ -55,7 +61,7 @@ impl Client {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             http: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
+                .timeout(Duration::from_secs(15))
                 .build()
                 .expect("reqwest client"),
         }
@@ -65,46 +71,51 @@ impl Client {
         let url = format!("{}/api/v1/rooms", self.base_url);
         let resp = self.http.post(&url).json(&req).send().await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("create_room failed {}: {}", status, body));
+            let s = resp.status();
+            return Err(anyhow!("create_room {}: {}", s, resp.text().await.unwrap_or_default()));
         }
         Ok(resp.json().await?)
     }
 
-    /// Long-poll: waits up to `timeout` for a joiner to appear, retrying every 2s.
+    /// Poll for new joiners with index >= after_idx.
+    /// Returns immediately with however many new joiners exist (may be empty).
+    pub async fn poll_peers(
+        &self,
+        room_id: &str,
+        host_token: &str,
+        after_idx: usize,
+    ) -> Result<Vec<IndexedPeer>> {
+        let url = format!(
+            "{}/api/v1/rooms/{}/peers?after={}",
+            self.base_url, room_id, after_idx
+        );
+        let resp = self.http.get(&url).bearer_auth(host_token).send().await?;
+        if !resp.status().is_success() {
+            let s = resp.status();
+            return Err(anyhow!("poll_peers {}: {}", s, resp.text().await.unwrap_or_default()));
+        }
+        let body: PollPeersResponse = resp.json().await?;
+        Ok(body.peers)
+    }
+
+    /// Wait until at least one new joiner appears (polls every 2 s until timeout).
     pub async fn wait_for_peer(
         &self,
         room_id: &str,
         host_token: &str,
-        timeout: std::time::Duration,
-    ) -> Result<PeerInfo> {
-        let url = format!("{}/api/v1/rooms/{}/peer", self.base_url, room_id);
+        after_idx: usize,
+        timeout: Duration,
+    ) -> Result<IndexedPeer> {
         let deadline = tokio::time::Instant::now() + timeout;
-
         loop {
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!("Timed out waiting for someone to join"));
             }
-
-            let resp = self
-                .http
-                .get(&url)
-                .bearer_auth(host_token)
-                .send()
-                .await?;
-
-            match resp.status() {
-                s if s == 200 => return Ok(resp.json().await?),
-                s if s == 204 => {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    continue;
-                }
-                s => {
-                    let body = resp.text().await.unwrap_or_default();
-                    return Err(anyhow!("wait_for_peer failed {}: {}", s, body));
-                }
+            let peers = self.poll_peers(room_id, host_token, after_idx).await?;
+            if let Some(first) = peers.into_iter().next() {
+                return Ok(first);
             }
+            tokio::time::sleep(Duration::from_secs(2)).await;
         }
     }
 
@@ -112,9 +123,8 @@ impl Client {
         let url = format!("{}/api/v1/rooms/{}/join", self.base_url, room_id);
         let resp = self.http.post(&url).json(&req).send().await?;
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("join_room failed {}: {}", status, body));
+            let s = resp.status();
+            return Err(anyhow!("join_room {}: {}", s, resp.text().await.unwrap_or_default()));
         }
         Ok(resp.json().await?)
     }
@@ -122,7 +132,6 @@ impl Client {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// Extract the room code from a full share URL or pass it through as-is.
 pub fn parse_room_id(target: &str) -> String {
     target
         .trim_end_matches('/')
