@@ -1,0 +1,38 @@
+[package]
+name        = "mc-share"
+version     = "0.1.0"
+edition     = "2021"
+description = "Minecraft Java Edition P2P World Sharing — no port forwarding, no accounts"
+
+[[bin]]
+name = "mc-share"
+path = "src/main.rs"
+
+[dependencies]
+tokio              = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+anyhow             = { workspace = true }
+thiserror          = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+rand               = { workspace = true }
+base64             = { workspace = true }
+bytes              = { workspace = true }
+
+clap     = { version = "4",    features = ["derive"] }
+reqwest  = { version = "0.12", features = ["json"] }
+
+# Cryptography
+x25519-dalek      = { version = "2",    features = ["static_secrets"] }
+chacha20poly1305  = "0.10"
+hkdf              = "0.12"
+sha2              = "0.10"
+
+# QUIC tunnel (P2P)
+quinn   = "0.11"
+rustls  = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen   = "0.13"
+
+# Low-level UDP
+socket2 = { version = "0.5", features = ["all"] }
