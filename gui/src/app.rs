@@ -170,6 +170,8 @@ impl App {
                     if let Ok(mut c) = share_cell.lock() { *c = Some(url); }
                 })),
                 cancel,
+                telemetry: mc_share::telemetry::enabled(false),
+                app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
             match host_run(config).await {
@@ -206,6 +208,8 @@ impl App {
                     if let Ok(mut c) = port_cell.lock() { *c = Some(port); }
                 })),
                 cancel,
+                telemetry: mc_share::telemetry::enabled(false),
+                app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
             match join_run(config).await {

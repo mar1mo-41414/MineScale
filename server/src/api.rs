@@ -20,6 +20,7 @@ pub struct AppState {
     pub room_limiter: KeyedLimiter,
     pub join_limiter: KeyedLimiter,
     pub poll_limiter: KeyedLimiter,
+    pub telemetry: Option<crate::telemetry::TelemetrySink>,
 }
 
 // ── Requests ──────────────────────────────────────────────────────────────────

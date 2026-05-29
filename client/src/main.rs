@@ -1,10 +1,12 @@
 mod cli;
 mod coord;
 mod crypto;
+mod diag;
 mod host;
 mod join;
 mod lan;
 mod stun;
+mod telemetry;
 mod tunnel;
 
 use anyhow::Result;

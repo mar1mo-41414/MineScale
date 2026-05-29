@@ -1,4 +1,4 @@
-use crate::{cli::HostArgs, coord, crypto, lan, stun, tunnel};
+use crate::{cli::HostArgs, coord, crypto, diag, lan, stun, telemetry, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
@@ -14,6 +14,10 @@ pub struct HostConfig {
     pub on_share_url: Option<Box<dyn FnOnce(String) + Send>>,
     /// Signals cancellation.  Drop the sender to cancel.
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Opt-in connection diagnostics. Off by default.
+    pub telemetry: bool,
+    /// `cli` for the bare binary, `gui` from the GUI front-end.
+    pub app_kind: telemetry::AppKind,
 }
 
 impl From<HostArgs> for HostConfig {
@@ -24,6 +28,8 @@ impl From<HostArgs> for HostConfig {
             stun_server: a.stun_server,
             on_share_url: None,
             cancel: tokio_util::sync::CancellationToken::new(),
+            telemetry: telemetry::enabled(a.telemetry),
+            app_kind: telemetry::AppKind::Cli,
         }
     }
 }
@@ -35,6 +41,36 @@ pub async fn run(args: HostArgs) -> Result<()> {
 }
 
 pub async fn run_with_config(mut config: HostConfig) -> Result<()> {
+    let mut report = telemetry::Reporter::new(
+        config.telemetry,
+        config.coord_url.clone(),
+        telemetry::Role::Host,
+        config.app_kind,
+    );
+    if config.telemetry {
+        let d = diag::run().await;
+        report.set_network(d.nat_type.label(), d.ipv6_available);
+        report.send_start().await;
+    }
+
+    let result = run_inner(&mut config, &mut report).await;
+
+    // Classify error → outcome
+    match &result {
+        Ok(()) => report.send_result(telemetry::Outcome::Success, None).await,
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            let outcome = classify_error(&msg);
+            report.send_result(outcome, Some(short(&msg))).await;
+        }
+    }
+    result
+}
+
+async fn run_inner(
+    config: &mut HostConfig,
+    report: &mut telemetry::Reporter,
+) -> Result<()> {
     // ── 1. Detect or use Minecraft port ──────────────────────────────────────
     let mc_port = if config.mc_port != 0 {
         config.mc_port
@@ -66,6 +102,7 @@ pub async fn run_with_config(mut config: HostConfig) -> Result<()> {
         cert_fingerprint: fp_b64,
     }).await?;
 
+    report.set_room(&room.room_id);
     print_share_link(&room.share_url);
     if let Some(cb) = config.on_share_url.take() {
         cb(room.share_url.clone());
@@ -146,6 +183,26 @@ async fn poll_more_joiners(
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
+
+fn classify_error(msg: &str) -> telemetry::Outcome {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("stun") { telemetry::Outcome::StunFailed }
+    else if m.contains("coord") || m.contains("room") || m.contains("http") {
+        telemetry::Outcome::CoordFailed
+    }
+    else if m.contains("punch") || m.contains("hole") { telemetry::Outcome::PunchFailed }
+    else if m.contains("tls") || m.contains("certificate") { telemetry::Outcome::TlsFailed }
+    else if m.contains("quic") || m.contains("connect")    { telemetry::Outcome::QuicFailed }
+    else if m.contains("cancel") { telemetry::Outcome::Cancelled }
+    else { telemetry::Outcome::Other }
+}
+
+fn short(msg: &str) -> &str {
+    // First line, capped at 120 bytes — no IPs or external addresses get
+    // printed by our error types, so this is safe to forward.
+    let line = msg.lines().next().unwrap_or("");
+    if line.len() <= 120 { line } else { &line[..120] }
+}
 
 fn print_share_link(url: &str) {
     println!();

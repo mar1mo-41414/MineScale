@@ -32,6 +32,11 @@ pub struct HostArgs {
     /// STUN server for NAT traversal
     #[arg(long, default_value = "stun.l.google.com:19302")]
     pub stun_server: String,
+
+    /// Send anonymous connection diagnostics to the coordination server.
+    /// Off by default. See README ("接続調査への協力について") for what is collected.
+    #[arg(long, env = "MC_SHARE_TELEMETRY", default_value_t = false)]
+    pub telemetry: bool,
 }
 
 #[derive(Args)]
@@ -50,4 +55,9 @@ pub struct JoinArgs {
     /// STUN server for NAT traversal
     #[arg(long, default_value = "stun.l.google.com:19302")]
     pub stun_server: String,
+
+    /// Send anonymous connection diagnostics to the coordination server.
+    /// Off by default. See README ("接続調査への協力について") for what is collected.
+    #[arg(long, env = "MC_SHARE_TELEMETRY", default_value_t = false)]
+    pub telemetry: bool,
 }

@@ -1,4 +1,4 @@
-use crate::{cli::JoinArgs, coord, crypto, lan, stun, tunnel};
+use crate::{cli::JoinArgs, coord, crypto, diag, lan, stun, telemetry, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
@@ -14,6 +14,9 @@ pub struct JoinConfig {
     /// Called once with the local proxy port when the tunnel is ready.
     pub on_connected: Option<Box<dyn FnOnce(u16) + Send>>,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Opt-in connection diagnostics. Off by default.
+    pub telemetry: bool,
+    pub app_kind: telemetry::AppKind,
 }
 
 impl From<JoinArgs> for JoinConfig {
@@ -25,6 +28,8 @@ impl From<JoinArgs> for JoinConfig {
             stun_server: a.stun_server,
             on_connected: None,
             cancel: tokio_util::sync::CancellationToken::new(),
+            telemetry: telemetry::enabled(a.telemetry),
+            app_kind: telemetry::AppKind::Cli,
         }
     }
 }
@@ -35,8 +40,38 @@ pub async fn run(args: JoinArgs) -> Result<()> {
     run_with_config(args.into()).await
 }
 
-pub async fn run_with_config(mut config: JoinConfig) -> Result<()> {
+pub async fn run_with_config(config: JoinConfig) -> Result<()> {
+    let mut report = telemetry::Reporter::new(
+        config.telemetry,
+        config.coord_url.clone(),
+        telemetry::Role::Join,
+        config.app_kind,
+    );
+    if config.telemetry {
+        let d = diag::run().await;
+        report.set_network(d.nat_type.label(), d.ipv6_available);
+        report.send_start().await;
+    }
+
+    let result = run_inner(config, &mut report).await;
+
+    match &result {
+        Ok(()) => report.send_result(telemetry::Outcome::Success, None).await,
+        Err(e) => {
+            let msg = format!("{:#}", e);
+            let outcome = classify_error(&msg);
+            report.send_result(outcome, Some(short(&msg))).await;
+        }
+    }
+    result
+}
+
+async fn run_inner(
+    mut config: JoinConfig,
+    report: &mut telemetry::Reporter,
+) -> Result<()> {
     let room_id = coord::parse_room_id(&config.target);
+    report.set_room(&room_id);
 
     // ── 1. Keypair ────────────────────────────────────────────────────────────
     let keypair    = crypto::Keypair::generate();
@@ -92,6 +127,24 @@ async fn resolve_local_port(preferred: u16) -> Result<u16> {
     }
     let l = tokio::net::TcpListener::bind("0.0.0.0:0").await?;
     Ok(l.local_addr()?.port())
+}
+
+fn classify_error(msg: &str) -> telemetry::Outcome {
+    let m = msg.to_ascii_lowercase();
+    if m.contains("stun") { telemetry::Outcome::StunFailed }
+    else if m.contains("coord") || m.contains("room") || m.contains("http") {
+        telemetry::Outcome::CoordFailed
+    }
+    else if m.contains("punch") || m.contains("hole") { telemetry::Outcome::PunchFailed }
+    else if m.contains("tls") || m.contains("certificate") { telemetry::Outcome::TlsFailed }
+    else if m.contains("quic") || m.contains("connect")    { telemetry::Outcome::QuicFailed }
+    else if m.contains("cancel") { telemetry::Outcome::Cancelled }
+    else { telemetry::Outcome::Other }
+}
+
+fn short(msg: &str) -> &str {
+    let line = msg.lines().next().unwrap_or("");
+    if line.len() <= 120 { line } else { &line[..120] }
 }
 
 fn print_connected(port: u16) {
