@@ -1,187 +1,152 @@
 # MineScale-Java
 
-**Minecraft Java Edition向け、ポート開放不要のP2Pワールド共有ツール。**
+**マイクラ（Java版）のワールドを、友達と一緒に遊ぶ。それだけ。**
 
-URLを送るだけで友達があなたのワールドに参加できます。
-
-```
-mc-share host          # ホスト側: URLを発行
-mc-share join <URL>    # 参加側: URLを渡すだけ
-```
+URL をひとつ送るだけ。友達のマイクラに、あなたのワールドが出てきます。
 
 ---
 
-## コンセプト
+## こんなこと、必要ありません
 
-Minecraft版 AirDropを目指す。ネットワーク知識ゼロでも使えること。
+❌ ルーターの設定（ポート開放）
+❌ アカウント登録
+❌ サーバー契約
+❌ 月額料金
+❌ VPN ソフトのインストール
+❌ ネットワークの知識
+❌ サーバー（realms など）の購入
 
-- ポート開放不要
-- アカウント不要
-- P2P優先（Coordination Serverはゲームデータを見ない）
-- E2E暗号化（QUIC/TLS 1.3）
-- LANワールド自動検出 → Minecraftのマルチプレイ画面に自動表示
+✅ アプリを開く
+✅ ボタンを押す
+✅ 出てきた URL を友達に送る
 
----
-
-## 通信アーキテクチャ
-
-```
-Coordination Server (VPS)
-  │  signaling only (HTTP)
-  │  NAT情報・鍵交換のみ
-  ├── room registry
-  ├── peer exchange
-  └── relay fallback (P2P失敗時のみ)
-
-Host Client ════════════════ Join Client
-  (QUIC over UDP, E2E暗号化)
-  cert-pinned TLS 1.3
-  X25519 Diffie-Hellman
-```
+これだけです。
 
 ---
 
-## 接続フロー
+## 使い方（GUI 版・おすすめ）
 
-```
-1. mc-share host
-   → STUN でパブリックIP:portを取得
-   → Coordination Server に部屋を登録 → URLを発行
+### ホスト（ワールドを公開する人）
 
-2. mc-share join <URL>
-   → Coordination Server から相手の情報を取得
-   → 双方向UDPプローブでホールパンチ
-   → QUICセッション確立 (cert pinning で認証)
-   → 127.0.0.1:25565 にTCPリスナーを起動
-   → マルチキャスト(224.0.2.60:4445)でLANワールドを偽装アナウンス
+1. マイクラでワールドを開いて、ESC →「LAN に公開」
+2. `mc-share-gui` をダブルクリックで起動
+3. 「Host」を押す
+4. 出てきた URL をコピーして、友達に LINE / Discord / なんでもいいので送る
 
-3. Minecraftのマルチプレイ一覧にワールドが自動表示される
-```
+### ジョイン（参加する人）
+
+1. `mc-share-gui` を起動
+2. 「Join」タブを開いて、もらった URL を貼り付ける
+3. 「Connect」を押す
+4. マイクラを開く → マルチプレイ → 友達のワールドが勝手に出てくる
+5. クリックして入る。以上。
+
+> マイクラ本体のマルチプレイ画面に、まるで同じ家にいるかのようにワールドが現れます。
 
 ---
 
-## ビルド
+## ダウンロード
 
-### 前提
-- Rust 1.76+
+👉 **[最新版を Releases ページからダウンロード](https://github.com/mar1mo-41414/MineScale/releases/latest)**
+
+自分の OS のものを選んでください。
+
+| OS | 使うファイル |
+|----|--------------|
+| Windows | `mc-share-gui-windows-x64.exe` |
+| Mac (Intel / Apple Silicon どちらも) | `mc-share-gui-macos` |
+| Linux (x64) | `mc-share-gui-linux-x64` |
+| Linux (arm64) | `mc-share-gui-linux-arm64` |
+
+ダブルクリックで起動。インストール作業もいりません。
+
+> Mac / Linux の場合、初回だけ実行権限が必要です:
+> ```bash
+> chmod +x mc-share-gui-macos
+> ```
+
+---
+
+## なんで設定がいらないの？
+
+ふつうマイクラを友達と遊ぼうとすると、
+
+- ルーターのポート開放
+- グローバル IP の固定
+- realms の月額契約
+- Hamachi みたいな VPN ソフトのインストールとアカウント登録
+- マイクラサーバーの建立と運用
+
+…と、めちゃくちゃ面倒です。
+
+MineScale-Java は、これら全部を **裏側で自動的に** やってくれます。
+あなたがやることは、ボタンを押すだけ。
+
+---
+
+## CLI 版もあります（黒い画面が好きな人向け）
 
 ```bash
-# クライアント
-cargo build --release -p mc-share
-
-# サーバー
-cargo build --release -p mc-share-server
-```
-
-クロスコンパイル例（Linux向け, macOSから）:
-```bash
-rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl -p mc-share
-```
-
----
-
-## 使い方
-
-### ホスト側
-
-LAN公開中のワールドを自動検出:
-```bash
+# ホスト
 mc-share host
+
+# 参加
+mc-share join <URL>
 ```
 
-ポートを直接指定:
-```bash
-mc-share host --port 25565
-```
-
-出力:
-```
-  ┌────────────────────────────────────────────────┐
-  │  World shared! Send this link to your friend:  │
-  │                                                  │
-  │  https://mcs.example.com/8fk2lm                 │
-  └────────────────────────────────────────────────┘
-```
-
-### 参加側
-
-```bash
-mc-share join https://mcs.example.com/8fk2lm
-# または
-mc-share join 8fk2lm
-```
-
-接続後はMinecraftのマルチプレイ画面にワールドが自動表示される。
+GUI と機能はまったく同じです。お好みでどうぞ。
 
 ---
 
-## Coordination Server のデプロイ
+## よくある質問
 
-```bash
-# 環境変数
-export BASE_URL="https://mcs.example.com"
-export RELAY_ADDR="203.0.113.1:9090"   # このサーバーのパブリックIP
-export LISTEN_HTTP="0.0.0.0:8080"
-export LISTEN_RELAY="0.0.0.0:9090"
+**Q. 危なくないの？ 知らないサーバーを経由するんでしょ？**
+A. 通信はあなたと友達の間で直接つながります（P2P）。
+   間にあるサーバーは「お互いのアドレスを伝えるだけ」の役目で、
+   ゲームのデータは見られませんし、見ることもできません（暗号化されています）。
 
-./mc-share-server
-```
+**Q. ワールドを乗っ取られたりしない？**
+A. URL を知っている人しか入れません。SNS で晒したりしなければ大丈夫です。
 
-### nginx リバースプロキシ例
+**Q. ラグくない？**
+A. サーバーを経由しないので、友達と直接 LINE 電話するのと同じ仕組みです。
+   遠ければそれなりに遅延しますが、追加の遅延はほぼありません。
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name mcs.example.com;
+**Q. アカウント登録しなくていいの？**
+A. はい。メールアドレスも電話番号も不要です。
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header X-Forwarded-For $remote_addr;
-    }
-}
-```
+**Q. お金かかる？**
+A. かかりません。誰のサーバーも借りません。
 
----
+**Q. ホストの人がマイクラ閉じたらどうなる？**
+A. ふつうの LAN マルチと同じです。みんな抜けます。
 
-## セキュリティ設計
-
-| 要素 | 実装 |
-|------|------|
-| 暗号化 | QUIC / TLS 1.3 (P2P) |
-| 鍵交換 | X25519 Diffie-Hellman |
-| 証明書検証 | SHA-256フィンガープリントピニング |
-| Relay認証 | 128-bit ランダムトークン |
-| NAT Traversal | STUN + UDPホールパンチング |
-| Relay fallback | TCP, Minecraft handshakeバリデーション付き |
-| レート制限 | 部屋作成: 10回/分/IP, Join: 5回/秒/IP |
-| 部屋有効期限 | 未接続15分で自動削除 |
-| 汎用転送禁止 | MinecraftのTCPのみ, 任意ポート/プロトコル不可 |
-
-### Coordination Serverは何も見ない
-
-- ゲームデータはCoordination Serverを通過しない
-- P2P確立後はサーバー非関与
-- Relayのみ通信を中継するが、暗号化トークン認証で部屋単位に制限
+**Q. 何人まで一緒に遊べる？**
+A. マイクラの LAN 公開と同じ上限です（ホストの PC とネット回線次第）。
 
 ---
 
-## 対応OS
+## 対応 OS
 
-- Windows 10/11
-- Linux (x86_64, ARM64)
-- macOS (Intel, Apple Silicon)
+- Windows 10 / 11
+- macOS（Intel / Apple Silicon）
+- Linux（x64 / arm64）
 
 ---
 
-## 非目標
+## バージョン
 
-以下は実装しない:
-- 永続VPN / 仮想NIC
-- 管理UI / アカウントシステム
-- フレンド機能
-- 汎用トンネル / ファイル共有
-- 任意通信転送
+**v1.1** — GUI 搭載版
+
+- v1.0: CLI 版リリース
+- v1.1: GUI 版を追加、複数人同時接続、診断パネル追加
+
+---
+
+## もっと詳しく知りたい人へ
+
+技術仕様・通信アーキテクチャ・セキュリティ設計は [SPEC.md](SPEC.md) を見てください。
+ビルド手順は [BUILD.md](BUILD.md) を見てください。
 
 ---
 

@@ -25,12 +25,12 @@ pub enum NatType {
 }
 
 impl NatType {
-    pub fn label_ja(&self) -> &str {
+    pub fn label(&self) -> &str {
         match self {
-            Self::UdpBlocked     => "UDP ブロック (P2P 不可)",
-            Self::Cone           => "コーン型 NAT (P2P 接続可能)",
-            Self::Symmetric      => "シンメトリック NAT (P2P 困難・リレー使用)",
-            Self::Indeterminate  => "不明 (1 サーバーのみ応答)",
+            Self::UdpBlocked    => "UDP Blocked (P2P unavailable)",
+            Self::Cone          => "Cone NAT (P2P ready)",
+            Self::Symmetric     => "Symmetric NAT (relay mode)",
+            Self::Indeterminate => "Indeterminate (1 server only)",
         }
     }
     pub fn is_ok(&self) -> bool { *self == Self::Cone }
@@ -58,7 +58,7 @@ pub struct DiagResult {
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 pub async fn run() -> DiagResult {
-    tracing::info!("Running diagnostics…");
+    tracing::info!("Running diagnostics...");
 
     // Run network checks in parallel
     let (nat_res, ipv6_res) = tokio::join!(
@@ -82,7 +82,7 @@ pub async fn run() -> DiagResult {
         mc_versions,
     };
 
-    tracing::info!("Diagnostics complete: NAT={}", result.nat_type.label_ja());
+    tracing::info!("Diagnostics complete: NAT={}", result.nat_type.label());
     result
 }
 

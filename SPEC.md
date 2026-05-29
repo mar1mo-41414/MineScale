@@ -1,4 +1,9 @@
-# MineScale-Java 技術仕様書 v1.0
+# MineScale-Java 技術仕様書 v1.1
+
+> v1.1 変更点
+> - GUI クライアント (`mc-share-gui`, eframe/egui) を追加
+> - ホストへの複数ジョイナー同時接続をサポート
+> - 診断パネル（NAT タイプ / IPv6 / OS / Minecraft インストール検出）を追加
 
 ## 概要
 

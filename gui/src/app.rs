@@ -408,7 +408,7 @@ impl App {
 
         ui.horizontal(|ui| {
             let btn = egui::Button::new(
-                RichText::new(if running { "  診断中…  " } else { "  🔍 診断を実行  " }).size(15.0),
+                RichText::new(if running { "  Running...  " } else { "  Run Diagnostics  " }).size(15.0),
             );
             if ui.add_enabled(!running, btn).clicked() {
                 self.start_diag(ctx.clone());
@@ -430,7 +430,7 @@ impl App {
         let Some(r) = result_opt else {
             if !running {
                 ui.add_space(8.0);
-                ui.label(RichText::new("ボタンを押して診断を開始してください。").color(Color32::GRAY));
+                ui.label(RichText::new("Press the button to start diagnostics.").color(Color32::GRAY));
             }
             return;
         };
@@ -438,7 +438,7 @@ impl App {
         ui.add_space(8.0);
 
         // ── Network ──────────────────────────────────────────────────────────
-        ui.label(RichText::new("ネットワーク").strong());
+        ui.label(RichText::new("Network").strong());
         ui.separator();
 
         egui::Grid::new("diag_net")
@@ -447,47 +447,47 @@ impl App {
             .striped(true)
             .show(ui, |ui| {
                 // External IPv4 (primary)
-                ui.label("外部アドレス (IPv4)");
+                ui.label("External Address (IPv4)");
                 match r.ext_v4_primary {
                     Some(a) => { ui.label(RichText::new(a.to_string()).monospace()); }
-                    None    => { ui.colored_label(Color32::from_rgb(255,90,90), "取得失敗"); }
+                    None    => { ui.colored_label(Color32::from_rgb(255,90,90), "Failed"); }
                 }
                 ui.end_row();
 
                 // External IPv4 (secondary — for NAT comparison)
                 if let Some(a2) = r.ext_v4_secondary {
-                    ui.label("外部アドレス (STUN2)");
+                    ui.label("External Address (STUN2)");
                     ui.label(RichText::new(a2.to_string()).monospace());
                     ui.end_row();
                 }
 
                 // NAT type
-                ui.label("NAT タイプ");
+                ui.label("NAT Type");
                 let (icon, color) = match r.nat_type {
                     NatType::Cone          => ("✅", Color32::from_rgb(100, 220, 100)),
                     NatType::Indeterminate => ("⚠️", Color32::from_rgb(255, 210, 60)),
                     NatType::UdpBlocked    => ("❌", Color32::from_rgb(255,  90,  90)),
                     NatType::Symmetric     => ("⚠️", Color32::from_rgb(255, 160,  50)),
                 };
-                ui.colored_label(color, format!("{} {}", icon, r.nat_type.label_ja()));
+                ui.colored_label(color, format!("{} {}", icon, r.nat_type.label()));
                 ui.end_row();
 
                 // UDP
                 ui.label("UDP");
                 let udp_ok = r.ext_v4_primary.is_some();
                 if udp_ok {
-                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ 利用可能");
+                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ Available");
                 } else {
-                    ui.colored_label(Color32::from_rgb(255,  90,  90), "❌ ブロック / 失敗");
+                    ui.colored_label(Color32::from_rgb(255,  90,  90), "❌ Blocked / Failed");
                 }
                 ui.end_row();
 
                 // IPv6
                 ui.label("IPv6");
                 if r.ipv6_available {
-                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ 利用可能");
+                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ Available");
                 } else {
-                    ui.colored_label(Color32::GRAY, "— 利用不可");
+                    ui.colored_label(Color32::GRAY, "— Unavailable");
                 }
                 ui.end_row();
             });
@@ -498,14 +498,14 @@ impl App {
             NatType::Symmetric => {
                 ui.colored_label(
                     Color32::from_rgb(255, 160, 50),
-                    "⚠ シンメトリック NAT のため P2P 接続が困難です。\n\
-                     接続時はリレーサーバーが自動的に使用されます。",
+                    "⚠ Symmetric NAT — P2P is difficult.\n\
+                     Relay will be used automatically when connecting.",
                 );
             }
             NatType::UdpBlocked => {
                 ui.colored_label(
                     Color32::from_rgb(255, 90, 90),
-                    "❌ UDP がブロックされています。ファイアウォール設定を確認してください。",
+                    "❌ UDP is blocked. Check your firewall settings.",
                 );
             }
             _ => {}
@@ -514,7 +514,7 @@ impl App {
         ui.add_space(12.0);
 
         // ── System ───────────────────────────────────────────────────────────
-        ui.label(RichText::new("システム").strong());
+        ui.label(RichText::new("System").strong());
         ui.separator();
         egui::Grid::new("diag_sys")
             .num_columns(2)
@@ -525,7 +525,7 @@ impl App {
                 ui.label(&r.os_detail);
                 ui.end_row();
 
-                ui.label("アーキテクチャ");
+                ui.label("Architecture");
                 ui.label(RichText::new(&r.arch).monospace());
                 ui.end_row();
             });
@@ -540,20 +540,20 @@ impl App {
             .spacing([16.0, 4.0])
             .striped(true)
             .show(ui, |ui| {
-                ui.label("データフォルダ");
+                ui.label("Data folder");
                 match &r.mc_dir {
                     Some(d) => {
                         ui.label(RichText::new(d.display().to_string()).monospace().size(11.0));
                     }
                     None => {
-                        ui.colored_label(Color32::GRAY, "— 見つかりません");
+                        ui.colored_label(Color32::GRAY, "— Not found");
                     }
                 }
                 ui.end_row();
 
-                ui.label("インストール済みバージョン");
+                ui.label("Installed versions");
                 if r.mc_versions.is_empty() {
-                    ui.colored_label(Color32::GRAY, "— 未検出");
+                    ui.colored_label(Color32::GRAY, "— None detected");
                 } else {
                     ui.label(r.mc_versions.join(", "));
                 }
@@ -602,7 +602,7 @@ impl eframe::App for App {
                 ui.heading("🧱 MineScale-Java");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let idle = self.state == RunState::Idle;
-                    ui.selectable_value(&mut self.mode, Mode::Diag, "診断");
+                    ui.selectable_value(&mut self.mode, Mode::Diag, "Diag");
                     ui.add_enabled_ui(idle, |ui| {
                         ui.selectable_value(&mut self.mode, Mode::Join, "Join");
                         ui.selectable_value(&mut self.mode, Mode::Host, "Host");
