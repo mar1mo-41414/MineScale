@@ -1,3 +1,7 @@
+// On Windows, suppress the console window that would otherwise appear
+// alongside the GUI window.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod app;
 
 use app::{GuiLayer, LogEntry, LogLevel};
