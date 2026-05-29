@@ -116,10 +116,11 @@ fn build_client_endpoint(
     use quinn::crypto::rustls::QuicClientConfig;
 
     let verifier = Arc::new(PinnedCertVerifier(expected_fingerprint));
-    let client_tls = rustls::ClientConfig::builder()
+    let mut client_tls = rustls::ClientConfig::builder()
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
+    client_tls.alpn_protocols = vec![b"minescale-1".to_vec()];
 
     let quic_client = QuicClientConfig::try_from(client_tls)
         .map_err(|e| anyhow!("QuicClientConfig: {}", e))?;
