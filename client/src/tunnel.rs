@@ -13,32 +13,60 @@ use tracing::{debug, info, warn};
 // ── Hole punching ─────────────────────────────────────────────────────────────
 
 const PROBE_MAGIC: &[u8] = b"MCS\x01";
-const HOLE_PUNCH_TIMEOUT: Duration = Duration::from_secs(15);
-const PROBE_INTERVAL: Duration = Duration::from_millis(200);
+const HOLE_PUNCH_TIMEOUT: Duration = Duration::from_secs(20);
+const PROBE_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Send probes and wait to receive one back — confirms both NATs have holes punched.
+// After we receive the peer's first probe, we keep sending our own probes for
+// this long before handing the socket to QUIC.
+//
+// Why: when the host receives the joiner's probe it immediately had a hole open,
+// but the joiner's NAT may not yet have seen a probe *from* the host.
+// Without this grace period the host stops sending probes the moment it gets
+// the first one back, so the joiner times out.
+const GRACE_AFTER_RECEIVE: Duration = Duration::from_millis(2500);
+
+/// UDP hole punching — sends probes to `peer` and waits to receive one back.
+/// After receiving the first probe a grace period keeps probes flowing so the
+/// remote side also has time to receive ours before we hand off the socket.
 pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
     info!("Hole punching to {}…", peer);
+
     let mut probe_interval = tokio::time::interval(PROBE_INTERVAL);
+    probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut recv_buf = [0u8; 64];
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
 
     tokio::time::timeout(HOLE_PUNCH_TIMEOUT, async {
         loop {
             tokio::select! {
-                _ = probe_interval.tick() => {
-                    let _ = socket.send_to(PROBE_MAGIC, peer).await;
-                    debug!("Sent hole-punch probe to {}", peer);
-                }
                 result = socket.recv_from(&mut recv_buf) => {
                     match result {
-                        Ok((len, src)) if src == peer && len >= PROBE_MAGIC.len()
-                            && recv_buf[..PROBE_MAGIC.len()] == *PROBE_MAGIC =>
+                        Ok((len, src))
+                            if src == peer
+                                && len >= PROBE_MAGIC.len()
+                                && recv_buf[..PROBE_MAGIC.len()] == *PROBE_MAGIC =>
                         {
-                            info!("Hole punched! Got probe from {}", src);
+                            if grace_deadline.is_none() {
+                                info!("Hole punched! Got probe from {} — entering grace period", src);
+                                grace_deadline = Some(
+                                    tokio::time::Instant::now() + GRACE_AFTER_RECEIVE,
+                                );
+                            }
+                        }
+                        Ok(_) => {} // spurious packet (e.g. STUN residual)
+                        Err(e) => return Err(anyhow!(e)),
+                    }
+                }
+                _ = probe_interval.tick() => {
+                    let _ = socket.send_to(PROBE_MAGIC, peer).await;
+                    debug!("Sent probe to {}", peer);
+                    // Only exit after the grace period has elapsed so the peer
+                    // has time to receive our probes before we stop sending.
+                    if let Some(dl) = grace_deadline {
+                        if tokio::time::Instant::now() >= dl {
+                            info!("Grace period complete — proceeding to QUIC");
                             return Ok(());
                         }
-                        Ok(_) => continue, // spurious packet
-                        Err(e) => return Err(anyhow!(e)),
                     }
                 }
             }
