@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, Ui};
 use mc_share::{
+    diag::{DiagResult, NatType},
     host::{run_with_config as host_run, HostConfig},
     join::{run_with_config as join_run, JoinConfig},
 };
@@ -67,7 +68,7 @@ impl<S: tracing::Subscriber> Layer<S> for GuiLayer {
 // ── State ─────────────────────────────────────────────────────────────────────
 
 #[derive(PartialEq, Clone, Copy)]
-enum Mode { Host, Join }
+enum Mode { Host, Join, Diag }
 
 #[derive(PartialEq, Clone, Copy)]
 enum RunState { Idle, Running }
@@ -95,6 +96,10 @@ pub struct App {
     /// When the host room expires (15 min after share URL appears).
     room_expires_at: Option<std::time::Instant>,
 
+    // ── diagnostics ──────────────────────────────────────────────────────────
+    diag_result:  Arc<Mutex<Option<DiagResult>>>,
+    diag_running: bool,
+
     // ── log ──────────────────────────────────────────────────────────────────
     log: Arc<Mutex<Vec<LogEntry>>>,
 
@@ -116,6 +121,8 @@ impl App {
             share_url:  String::new(),
             local_port: 0,
             room_expires_at: None,
+            diag_result:  Arc::new(Mutex::new(None)),
+            diag_running: false,
             log,
             cancel: None,
         }
@@ -376,6 +383,184 @@ impl App {
         }
     }
 
+    // ── Diagnostics ───────────────────────────────────────────────────────────
+
+    fn start_diag(&mut self, ctx: egui::Context) {
+        self.diag_running = true;
+        if let Ok(mut r) = self.diag_result.lock() { *r = None; }
+
+        let cell = Arc::clone(&self.diag_result);
+        let rt   = Arc::clone(&self.rt);
+        let ctx2 = ctx.clone();
+
+        rt.spawn(async move {
+            let result = mc_share::diag::run().await;
+            if let Ok(mut c) = cell.lock() { *c = Some(result); }
+            ctx2.request_repaint();
+        });
+    }
+
+    fn show_diag_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
+        ui.add_space(4.0);
+
+        let running = self.diag_running
+            && self.diag_result.lock().map(|r| r.is_none()).unwrap_or(true);
+
+        ui.horizontal(|ui| {
+            let btn = egui::Button::new(
+                RichText::new(if running { "  診断中…  " } else { "  🔍 診断を実行  " }).size(15.0),
+            );
+            if ui.add_enabled(!running, btn).clicked() {
+                self.start_diag(ctx.clone());
+            }
+            if running {
+                ui.spinner();
+            }
+        });
+
+        let result_opt: Option<DiagResult> = self
+            .diag_result
+            .lock()
+            .ok()
+            .and_then(|r| r.clone());
+
+        // Update running flag when result arrives
+        if result_opt.is_some() { self.diag_running = false; }
+
+        let Some(r) = result_opt else {
+            if !running {
+                ui.add_space(8.0);
+                ui.label(RichText::new("ボタンを押して診断を開始してください。").color(Color32::GRAY));
+            }
+            return;
+        };
+
+        ui.add_space(8.0);
+
+        // ── Network ──────────────────────────────────────────────────────────
+        ui.label(RichText::new("ネットワーク").strong());
+        ui.separator();
+
+        egui::Grid::new("diag_net")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                // External IPv4 (primary)
+                ui.label("外部アドレス (IPv4)");
+                match r.ext_v4_primary {
+                    Some(a) => { ui.label(RichText::new(a.to_string()).monospace()); }
+                    None    => { ui.colored_label(Color32::from_rgb(255,90,90), "取得失敗"); }
+                }
+                ui.end_row();
+
+                // External IPv4 (secondary — for NAT comparison)
+                if let Some(a2) = r.ext_v4_secondary {
+                    ui.label("外部アドレス (STUN2)");
+                    ui.label(RichText::new(a2.to_string()).monospace());
+                    ui.end_row();
+                }
+
+                // NAT type
+                ui.label("NAT タイプ");
+                let (icon, color) = match r.nat_type {
+                    NatType::Cone          => ("✅", Color32::from_rgb(100, 220, 100)),
+                    NatType::Indeterminate => ("⚠️", Color32::from_rgb(255, 210, 60)),
+                    NatType::UdpBlocked    => ("❌", Color32::from_rgb(255,  90,  90)),
+                    NatType::Symmetric     => ("⚠️", Color32::from_rgb(255, 160,  50)),
+                };
+                ui.colored_label(color, format!("{} {}", icon, r.nat_type.label_ja()));
+                ui.end_row();
+
+                // UDP
+                ui.label("UDP");
+                let udp_ok = r.ext_v4_primary.is_some();
+                if udp_ok {
+                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ 利用可能");
+                } else {
+                    ui.colored_label(Color32::from_rgb(255,  90,  90), "❌ ブロック / 失敗");
+                }
+                ui.end_row();
+
+                // IPv6
+                ui.label("IPv6");
+                if r.ipv6_available {
+                    ui.colored_label(Color32::from_rgb(100, 220, 100), "✅ 利用可能");
+                } else {
+                    ui.colored_label(Color32::GRAY, "— 利用不可");
+                }
+                ui.end_row();
+            });
+
+        // NAT type hint
+        ui.add_space(4.0);
+        match r.nat_type {
+            NatType::Symmetric => {
+                ui.colored_label(
+                    Color32::from_rgb(255, 160, 50),
+                    "⚠ シンメトリック NAT のため P2P 接続が困難です。\n\
+                     接続時はリレーサーバーが自動的に使用されます。",
+                );
+            }
+            NatType::UdpBlocked => {
+                ui.colored_label(
+                    Color32::from_rgb(255, 90, 90),
+                    "❌ UDP がブロックされています。ファイアウォール設定を確認してください。",
+                );
+            }
+            _ => {}
+        }
+
+        ui.add_space(12.0);
+
+        // ── System ───────────────────────────────────────────────────────────
+        ui.label(RichText::new("システム").strong());
+        ui.separator();
+        egui::Grid::new("diag_sys")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("OS");
+                ui.label(&r.os_detail);
+                ui.end_row();
+
+                ui.label("アーキテクチャ");
+                ui.label(RichText::new(&r.arch).monospace());
+                ui.end_row();
+            });
+
+        ui.add_space(12.0);
+
+        // ── Minecraft ────────────────────────────────────────────────────────
+        ui.label(RichText::new("Minecraft Java Edition").strong());
+        ui.separator();
+        egui::Grid::new("diag_mc")
+            .num_columns(2)
+            .spacing([16.0, 4.0])
+            .striped(true)
+            .show(ui, |ui| {
+                ui.label("データフォルダ");
+                match &r.mc_dir {
+                    Some(d) => {
+                        ui.label(RichText::new(d.display().to_string()).monospace().size(11.0));
+                    }
+                    None => {
+                        ui.colored_label(Color32::GRAY, "— 見つかりません");
+                    }
+                }
+                ui.end_row();
+
+                ui.label("インストール済みバージョン");
+                if r.mc_versions.is_empty() {
+                    ui.colored_label(Color32::GRAY, "— 未検出");
+                } else {
+                    ui.label(r.mc_versions.join(", "));
+                }
+                ui.end_row();
+            });
+    }
+
     fn show_log_panel(&mut self, ui: &mut Ui) {
         ui.separator();
         ui.horizontal(|ui| {
@@ -417,6 +602,7 @@ impl eframe::App for App {
                 ui.heading("🧱 MineScale-Java");
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let idle = self.state == RunState::Idle;
+                    ui.selectable_value(&mut self.mode, Mode::Diag, "診断");
                     ui.add_enabled_ui(idle, |ui| {
                         ui.selectable_value(&mut self.mode, Mode::Join, "Join");
                         ui.selectable_value(&mut self.mode, Mode::Host, "Host");
@@ -430,6 +616,11 @@ impl eframe::App for App {
             match self.mode {
                 Mode::Host => self.show_host_panel(ui, ctx),
                 Mode::Join => self.show_join_panel(ui, ctx),
+                Mode::Diag => {
+                    ScrollArea::vertical()
+                        .max_height(ui.available_height() - 8.0)
+                        .show(ui, |ui| self.show_diag_panel(ui, ctx));
+                }
             }
 
             // ── Log ───────────────────────────────────────────────────────────

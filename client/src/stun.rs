@@ -54,6 +54,41 @@ pub async fn get_external_addr(stun_server: &str) -> Result<(UdpSocket, SocketAd
     Err(anyhow!("STUN failed after 3 attempts (server: {})", stun_server))
 }
 
+/// Query a STUN server using an *already-bound* socket.
+/// Used for NAT-type detection where we need to reuse the same local port.
+pub async fn query_stun(socket: &UdpSocket, stun_server: &str) -> Result<SocketAddr> {
+    let stun_addr = tokio::net::lookup_host(stun_server)
+        .await?
+        .find(|a| a.is_ipv4())
+        .ok_or_else(|| anyhow!("Could not resolve STUN server: {}", stun_server))?;
+
+    let mut transaction_id = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut transaction_id);
+    let request = build_binding_request(&transaction_id);
+
+    for attempt in 0..3 {
+        socket.send_to(&request, stun_addr).await?;
+        let mut buf = [0u8; 1024];
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            socket.recv_from(&mut buf),
+        )
+        .await
+        {
+            Ok(Ok((len, _))) => {
+                if let Ok(addr) = parse_binding_response(&buf[..len], &transaction_id) {
+                    return Ok(addr);
+                }
+            }
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => {
+                if attempt < 2 { continue; }
+            }
+        }
+    }
+    Err(anyhow!("STUN query failed (server: {})", stun_server))
+}
+
 fn build_binding_request(tid: &[u8; 12]) -> [u8; 20] {
     let mut buf = [0u8; 20];
     buf[0..2].copy_from_slice(&BINDING_REQUEST);

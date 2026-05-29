@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod diag;
 pub mod coord;
 pub mod crypto;
 pub mod host;
