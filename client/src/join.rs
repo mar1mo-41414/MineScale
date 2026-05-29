@@ -67,15 +67,17 @@ pub async fn run_with_config(mut config: JoinConfig) -> Result<()> {
     // ── 6. LAN world announcement ─────────────────────────────────────────────
     tokio::spawn(lan::announce_lan_world("MineScale World", local_port));
 
-    if let Some(cb) = config.on_connected.take() { cb(local_port); }
     print_connected(local_port);
 
     // ── 7. QUIC tunnel ────────────────────────────────────────────────────────
+    // on_connected fires INSIDE run_join, after QUIC is established and the
+    // TCP listener is bound — guaranteeing Minecraft won't see Connection refused.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
+    let on_connected = config.on_connected.take();
     let cancel = config.cancel.clone();
 
     tokio::select! {
-        r = tunnel::run_join(udp_socket, host_addr, cert_fingerprint, local_addr) => r?,
+        r = tunnel::run_join(udp_socket, host_addr, cert_fingerprint, local_addr, on_connected) => r?,
         _ = cancel.cancelled() => {}
     }
 

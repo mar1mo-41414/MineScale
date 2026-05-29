@@ -276,11 +276,15 @@ async fn forward_to_minecraft(
 
 /// Run the joiner side of the tunnel.
 /// Accept local TCP connections from Minecraft client, open QUIC streams to host.
+///
+/// `on_connected` is called *after* both the QUIC connection and the local TCP
+/// listener are ready — i.e. when it is actually safe for Minecraft to connect.
 pub async fn run_join(
     socket: UdpSocket,
     host_addr: SocketAddr,
     cert_fingerprint: Vec<u8>,
     local_addr: SocketAddr,
+    on_connected: Option<Box<dyn FnOnce(u16) + Send>>,
 ) -> Result<()> {
     let std_socket = socket.into_std()?;
     let endpoint = build_client_endpoint(std_socket, cert_fingerprint)?;
@@ -290,6 +294,13 @@ pub async fn run_join(
     info!("P2P tunnel established");
 
     let listener = tokio::net::TcpListener::bind(local_addr).await?;
+    let bound_port = listener.local_addr()?.port();
+    info!("Minecraft proxy ready on 0.0.0.0:{}", bound_port);
+
+    // Signal readiness only now — QUIC is up and TCP listener is bound.
+    if let Some(cb) = on_connected {
+        cb(bound_port);
+    }
 
     loop {
         match listener.accept().await {

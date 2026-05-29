@@ -22,4 +22,6 @@ eframe = { version = "0.28", default-features = false, features = [
 ] }
 egui = "0.28"
 
-tokio-util  = { version = "0.7", features = ["rt"] }
+tokio-util         = { version = "0.7", features = ["rt"] }
+tracing-subscriber = { workspace = true }
+arboard            = "3"
