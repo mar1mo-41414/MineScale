@@ -88,32 +88,37 @@ pub async fn run_with_config(mut config: HostConfig) -> Result<()> {
     println!("\n  Friend connected! Tunnelling to 127.0.0.1:{} …\n", mc_port);
     println!("  (The same link can be shared with more friends)\n");
 
-    // Run QUIC server and multi-joiner poller concurrently.
+    // Channel: poll_more_joiners → run_host, so run_host can poke new joiners
+    // from the QUIC port (required for Port-Restricted Cone NAT).
+    let (joiner_tx, joiner_rx) = tokio::sync::mpsc::unbounded_channel();
     let cancel = config.cancel.clone();
+
     tokio::select! {
-        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr) => r?,
+        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx) => r?,
         _ = poll_more_joiners(
                 coord,
                 room.room_id.clone(),
                 room.host_token.clone(),
-                first_peer.idx + 1,   // next expected index
+                first_peer.idx + 1,
                 cancel,
+                joiner_tx,
             ) => {}
     }
 
     Ok(())
 }
 
-/// Background task: poll for more joiners after the first one, warm-up NAT holes.
+/// Background task: poll for new joiners and forward their addresses to
+/// `run_host` so it can poke them from the QUIC port.
 async fn poll_more_joiners(
     coord: coord::Client,
     room_id: String,
     host_token: String,
     mut next_idx: usize,
     cancel: tokio_util::sync::CancellationToken,
+    joiner_tx: tokio::sync::mpsc::UnboundedSender<std::net::SocketAddr>,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(3));
-    // Poll for up to the room's 15-minute lifetime
     let deadline = tokio::time::Instant::now() + Duration::from_secs(14 * 60 + 30);
 
     loop {
@@ -127,13 +132,15 @@ async fn poll_more_joiners(
             Ok(peers) => {
                 for peer in peers {
                     if let Ok(addr) = peer.join_stun.parse() {
-                        info!("New joiner #{} at {} — warming up NAT hole", peer.idx, addr);
-                        tokio::spawn(tunnel::warm_up_hole(addr));
+                        info!("New joiner #{} detected at {} — sending to QUIC poke task", peer.idx, addr);
+                        // run_host receives this and pokes the joiner from the
+                        // QUIC port, opening the host's NAT for the joiner.
+                        let _ = joiner_tx.send(addr);
                         next_idx = peer.idx + 1;
                     }
                 }
             }
-            Err(e) => tracing::warn!("poll_more_joiners error: {}", e),
+            Err(e) => tracing::warn!("poll_more_joiners: {}", e),
         }
     }
 }

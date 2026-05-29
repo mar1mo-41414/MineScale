@@ -23,7 +23,9 @@ const GRACE_AFTER_RECEIVE: Duration = Duration::from_millis(2500);
 // If no probe is received within this window, proceed anyway.
 // Handles 2nd+ joiners where the host is already in QUIC mode and won't
 // reply with raw probes — the joiner still needs to open its own NAT hole.
-const BEST_EFFORT_SEND: Duration = Duration::from_secs(3);
+// 5 s gives the host's QUIC-poke task (≈2 s) time to complete before we
+// attempt the QUIC connect, opening the host's NAT first.
+const BEST_EFFORT_SEND: Duration = Duration::from_secs(5);
 
 /// UDP hole punching.
 ///
@@ -69,6 +71,8 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
                     } else if now.duration_since(start) >= BEST_EFFORT_SEND {
                         // No response yet but we've been sending long enough to
                         // open our NAT — proceed optimistically.
+                        // (2nd+ joiners: host is already in QUIC mode and won't
+                        //  reply to raw probes, so this path is normal.)
                         info!("No probe received — proceeding in best-effort mode");
                         return Ok(());
                     }
@@ -80,19 +84,25 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
     .map_err(|_| anyhow!("Hole punching timed out after {}s", HOLE_PUNCH_TIMEOUT.as_secs()))?
 }
 
-/// Send a burst of probes from a *temporary* socket to open the host's NAT
-/// for a new joiner's IP.  Called for 2nd+ joiners while QUIC is running.
-pub async fn warm_up_hole(joiner_addr: SocketAddr) {
-    match UdpSocket::bind("0.0.0.0:0").await {
-        Ok(sock) => {
-            for _ in 0..25 {
-                let _ = sock.send_to(PROBE_MAGIC, joiner_addr).await;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            debug!("Warm-up hole punching done for {}", joiner_addr);
+/// Poke a new joiner *from the QUIC endpoint* to open the host's NAT.
+///
+/// warm_up_hole (old approach) used a temporary socket on a random port.
+/// For Port-Restricted Cone NAT, only packets from the QUIC port itself
+/// (e.g. 33574) open the NAT entry for inbound QUIC from the joiner.
+/// This function is called from inside `run_host` which has access to the
+/// endpoint; it tries an outbound QUIC connection to the joiner address —
+/// the INITIAL packets come from the QUIC port, opening the correct NAT
+/// mapping even if the joiner isn't running a QUIC server.
+async fn poke_joiner_from_quic(endpoint: quinn::Endpoint, joiner_addr: SocketAddr) {
+    info!("Poking joiner {} from QUIC port to open NAT…", joiner_addr);
+    for _ in 0..15 {
+        if let Ok(connecting) = endpoint.connect(joiner_addr, "minescale") {
+            // We only need the INITIAL packets to be sent; ignore the result.
+            let _ = tokio::time::timeout(Duration::from_millis(150), connecting).await;
         }
-        Err(e) => warn!("warm_up_hole bind failed: {}", e),
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
+    debug!("QUIC poke done for {}", joiner_addr);
 }
 
 // ── QUIC endpoint builders ────────────────────────────────────────────────────
@@ -218,43 +228,63 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 // ── Host tunnel ───────────────────────────────────────────────────────────────
 
 /// Run the host side of the tunnel.
-/// For each QUIC bidirectional stream opened by the joiner,
-/// connect to the local Minecraft server and pipe traffic.
+///
+/// Accepts an *unlimited* number of QUIC connections (one per joiner).
+/// New joiner addresses received on `new_joiners_rx` are poked from the
+/// QUIC endpoint to open the host's NAT before the joiner attempts to connect.
 pub async fn run_host(
     socket: UdpSocket,
     _peer_addr: SocketAddr,
     cert_key: rcgen::CertifiedKey,
     mc_addr: SocketAddr,
+    mut new_joiners_rx: tokio::sync::mpsc::UnboundedReceiver<SocketAddr>,
 ) -> Result<()> {
     let std_socket = socket.into_std()?;
     let endpoint = build_server_endpoint(std_socket, &cert_key)?;
-    info!("QUIC server listening (waiting for joiner connection)…");
-
-    let conn = endpoint
-        .accept()
-        .await
-        .ok_or_else(|| anyhow!("QUIC endpoint closed before connection"))?
-        .await?;
-    info!("Joiner connected via QUIC from {}", conn.remote_address());
+    info!("QUIC server ready — accepting connections");
 
     loop {
-        match conn.accept_bi().await {
-            Ok(streams) => {
-                let mc_addr = mc_addr;
+        tokio::select! {
+            // ── Accept new QUIC connection from any joiner ────────────────────
+            incoming = endpoint.accept() => {
+                let connecting = incoming
+                    .ok_or_else(|| anyhow!("QUIC endpoint closed"))?;
                 tokio::spawn(async move {
-                    if let Err(e) = forward_to_minecraft(streams, mc_addr).await {
-                        warn!("Host stream error: {}", e);
+                    match connecting.await {
+                        Ok(conn) => {
+                            info!("Joiner connected via QUIC from {}", conn.remote_address());
+                            // Handle all Minecraft streams on this connection.
+                            loop {
+                                match conn.accept_bi().await {
+                                    Ok(streams) => {
+                                        tokio::spawn(async move {
+                                            if let Err(e) = forward_to_minecraft(streams, mc_addr).await {
+                                                warn!("Stream error: {}", e);
+                                            }
+                                        });
+                                    }
+                                    Err(quinn::ConnectionError::ApplicationClosed(_)) => {
+                                        info!("Joiner {} disconnected", conn.remote_address());
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("Connection error: {}", e);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => warn!("Incoming QUIC handshake failed: {}", e),
                     }
                 });
             }
-            Err(quinn::ConnectionError::ApplicationClosed(_)) => {
-                info!("Joiner closed the connection");
-                break;
+
+            // ── Poke new joiner from the QUIC port to open host NAT ───────────
+            Some(joiner_addr) = new_joiners_rx.recv() => {
+                tokio::spawn(poke_joiner_from_quic(endpoint.clone(), joiner_addr));
             }
-            Err(e) => return Err(e.into()),
         }
     }
-    Ok(())
 }
 
 async fn forward_to_minecraft(
