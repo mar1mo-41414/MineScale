@@ -10,15 +10,46 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
 
 /// Broadcast a fake LAN world to the local network so Minecraft's
 /// multiplayer screen shows the world automatically.
+///
+/// We deliberately constrain the announce to *the local machine only*:
+///   - outgoing multicast interface = loopback (so source IP = 127.0.0.1)
+///   - TTL = 0 (packet does not leave the host)
+///   - multicast loop enabled (default) — local delivery still works
+///
+/// Two benefits:
+///   1. Other devices on the same physical LAN don't see "MineScale
+///      World" in their server list at all. This is a privacy property
+///      — only the user running mc-share-gui:join is meant to see it.
+///   2. Minecraft on the same machine connects to 127.0.0.1:port (since
+///      that's the announce's source IP). The handshake packet carries
+///      "127.0.0.1" as the server_address, which makes the host's
+///      Minecraft treat the connection as a local LAN client (no online
+///      auth) — so even offline-mode accounts can join the LAN entry
+///      directly instead of going through "Add Server" with the
+///      Direct address.
 pub async fn announce_lan_world(motd: &str, port: u16) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
-    socket.set_multicast_ttl_v4(1)?;
+    socket.set_multicast_loop_v4(true)?;
+    socket.set_multicast_ttl_v4(0)?;
+    // Loopback as the outgoing multicast interface — source IP becomes
+    // 127.0.0.1. tokio's UdpSocket doesn't expose set_multicast_if_v4
+    // directly, so reach in via socket2.
+    {
+        use socket2::SockRef;
+        if let Err(e) = SockRef::from(&socket).set_multicast_if_v4(&Ipv4Addr::LOCALHOST) {
+            tracing::warn!(
+                "LAN announce: could not bind multicast to loopback ({}); \
+                 falling back — other devices on the LAN may also see the world.",
+                e
+            );
+        }
+    }
 
     let announcement = format!("[MOTD]{motd}[/MOTD][AD]{port}[/AD]");
     let target = SocketAddrV4::new(MULTICAST_ADDR, MULTICAST_PORT);
 
     tracing::info!(
-        "Announcing LAN world \"{}\" on multicast {}:{}",
+        "Announcing LAN world \"{}\" on multicast {}:{} (host-local, TTL=0)",
         motd,
         MULTICAST_ADDR,
         MULTICAST_PORT

@@ -1,6 +1,6 @@
 [package]
 name        = "mc-share-server"
-version     = "1.2.6"
+version     = "1.2.7"
 edition     = "2021"
 description = "MineScale-Java Coordination + Relay Server"
 
