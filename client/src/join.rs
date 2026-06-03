@@ -126,8 +126,7 @@ async fn run_inner(
     let report_for_transport = report.clone();
     let on_transport: Option<Box<dyn FnOnce(&str) + Send>> =
         Some(Box::new(move |t: &str| {
-            let mut r = report_for_transport;
-            r.set_transport(t);
+            report_for_transport.set_transport(t);
         }));
 
     let relay_fallback = relay::parse_relay_addr(&room.relay_addr).ok().map(|addr| {

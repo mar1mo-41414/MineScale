@@ -139,7 +139,6 @@ async fn run_inner(
             if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let r = report_for_quic.clone();
                 tokio::spawn(async move {
-                    let mut r = r;
                     r.set_transport("quic");
                     r.send_event(telemetry::Phase::Connected).await;
                 });
@@ -169,7 +168,6 @@ async fn run_inner(
                     if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         let r = report_relay.clone();
                         tokio::spawn(async move {
-                            let mut r = r;
                             r.set_transport("relay");
                             r.send_event(telemetry::Phase::Connected).await;
                         });

@@ -16,7 +16,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
@@ -74,7 +74,9 @@ pub struct Reporter {
     pub room_id: Option<String>,
 
     // Transport used for the connection (set when known: "quic" or "relay").
-    pub transport: Option<String>,
+    // Shared across all clones of the Reporter so a write from any callback
+    // is visible to the terminal `result` event sent by the outer task.
+    pub transport: Arc<OnceLock<String>>,
 
     // Set the moment the `Connected` checkpoint passes. Used by the
     // terminal-event classifier to distinguish "user cancelled before
@@ -94,7 +96,7 @@ impl Reporter {
             nat_type: None,
             ipv6_available: None,
             room_id: None,
-            transport: None,
+            transport: Arc::new(OnceLock::new()),
             connected_flag: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -108,8 +110,11 @@ impl Reporter {
         self.ipv6_available = Some(ipv6);
     }
 
-    pub fn set_transport(&mut self, transport: &str) {
-        self.transport = Some(transport.to_string());
+    /// Set the transport. Takes `&self` because the underlying OnceLock is
+    /// shared across clones — any clone can set, and all clones observe it.
+    /// First write wins; subsequent calls are ignored.
+    pub fn set_transport(&self, transport: &str) {
+        let _ = self.transport.set(transport.to_string());
     }
 
     pub fn was_connected(&self) -> bool {
@@ -170,7 +175,7 @@ impl Reporter {
             "arch": std::env::consts::ARCH,
             "app_version": env!("CARGO_PKG_VERSION"),
             "app_kind": self.app_kind,
-            "transport": self.transport,
+            "transport": self.transport.get(),
         })
     }
 
