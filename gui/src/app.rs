@@ -392,9 +392,13 @@ impl App {
                     ui.add_space(6.0);
                     ui.colored_label(Color32::from_rgb(100, 220, 100),
                         "✓  Connected! Open Minecraft → Multiplayer.");
-                    if self.local_port != 25565 {
-                        ui.label(format!("  Direct address:  127.0.0.1:{}", self.local_port));
-                    }
+                    ui.label(RichText::new(
+                        "  If the world doesn't appear or refuses to join,\n  \
+                         use \"Add Server\" with the direct address below:"
+                    ).color(Color32::GRAY).size(12.0));
+                    ui.label(RichText::new(
+                        format!("    127.0.0.1:{}", self.local_port)
+                    ).monospace());
                     ui.add_space(4.0);
                 } else {
                     ui.label(RichText::new("  Connecting…").italics().color(Color32::GRAY));

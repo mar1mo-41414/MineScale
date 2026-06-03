@@ -188,10 +188,10 @@ fn print_connected(port: u16) {
     println!("  │                                                            │");
     println!("  │  Open Minecraft → Multiplayer.                            │");
     println!("  │  The world should appear automatically in the list.       │");
-    if port != 25565 {
-        println!("  │                                                            │");
-        println!("  │  Or connect directly to:  127.0.0.1:{}                │", port);
-    }
+    println!("  │                                                            │");
+    println!("  │  If it doesn't appear or refuses to let you join,         │");
+    println!("  │  use \"Add Server\" → direct address below:                 │");
+    println!("  │      127.0.0.1:{}                                       │", port);
     println!("  └──────────────────────────────────────────────────────────┘");
     println!();
 }
