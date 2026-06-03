@@ -1,12 +1,17 @@
 [package]
 name        = "mc-share-gui"
-version     = "1.2.2"
+version     = "1.2.3"
 edition     = "2021"
 description = "MineScale-Java — GUI client"
 
 [[bin]]
 name = "mc-share-gui"
 path = "src/main.rs"
+
+# build.rs embeds Windows PE version info into the .exe so winget /
+# wingetcreate / Explorer Properties show ProductName, Version, etc.
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies]
 mc-share = { path = "../client" }
