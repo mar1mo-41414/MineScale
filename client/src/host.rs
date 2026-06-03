@@ -147,8 +147,9 @@ async fn run_inner(
     };
 
     // Spawn the relay park pool if the coordination server gave us a
-    // reachable relay address. The pool maintains 2 parked connections
-    // so that up to two joiners can fall back to relay in parallel.
+    // reachable relay address. The pool maintains 4 parked connections
+    // so several joiners' simultaneous MC connections (status pings +
+    // world joins) all find a ready park.
     let cancel = config.cancel.clone();
     if let Ok(relay_addr) = relay::parse_relay_addr(&room.relay_addr) {
         let cf = connected_flag.clone();
@@ -162,7 +163,7 @@ async fn run_inner(
                 room_id,
                 token,
                 mc_addr,
-                2,
+                4,
                 cancel_relay,
                 move || {
                     if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {

@@ -1,6 +1,6 @@
 [package]
 name        = "mc-share-server"
-version     = "1.2.4"
+version     = "1.2.5"
 edition     = "2021"
 description = "MineScale-Java Coordination + Relay Server"
 
@@ -27,3 +27,4 @@ dashmap      = "5"
 governor     = { version = "0.6", features = ["std"] }
 tokio-util   = { version = "0.7", features = ["codec"] }
 sha2         = "0.10"
+socket2      = { version = "0.5", features = ["all"] }

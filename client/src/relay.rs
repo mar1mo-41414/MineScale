@@ -10,7 +10,7 @@
 //!   Then: raw TCP pipe to the matched peer.
 
 use anyhow::{anyhow, Result};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -21,27 +21,56 @@ use tracing::{debug, info, warn};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 const AUTH_READ_TIMEOUT: Duration = Duration::from_secs(10);
+// Aggressive keepalive so middlebox-dropped relay sockets are detected
+// fast — Linux defaults are 2h, which is far too long for a parked stream
+// to silently die without us noticing.
+const KEEPALIVE_IDLE: Duration   = Duration::from_secs(45);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_RETRIES: u32      = 4;
 
-/// Resolve a relay endpoint string like "1.2.3.4:9090" to a SocketAddr.
-pub fn parse_relay_addr(s: &str) -> Result<SocketAddr> {
-    s.parse::<SocketAddr>()
-        .map_err(|e| anyhow!("invalid relay address {:?}: {}", s, e))
+/// Validate a relay endpoint string.  Accepts either a literal "host:port"
+/// (DNS resolved at connect time) or "ip:port".  Returns the string for
+/// later use by `dial_and_auth`.
+pub fn parse_relay_addr(s: &str) -> Result<String> {
+    if !s.contains(':') {
+        return Err(anyhow!("relay address missing :port — {:?}", s));
+    }
+    Ok(s.to_string())
 }
 
 // ── Common: dial + auth ──────────────────────────────────────────────────────
 
+fn tune(stream: &TcpStream) {
+    use socket2::{SockRef, TcpKeepalive};
+    // Disable Nagle so Minecraft's small packets aren't buffered.
+    let _ = stream.set_nodelay(true);
+    // Keep-alive: detect dead parked connections quickly.
+    // `with_retries` is only available on Linux/macOS/BSD; Windows applies
+    // a sensible default count once idle+interval are set.
+    let mut ka = TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL);
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "freebsd",
+              target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+    {
+        ka = ka.with_retries(KEEPALIVE_RETRIES);
+    }
+    let _ = SockRef::from(stream).set_tcp_keepalive(&ka);
+}
+
 async fn dial_and_auth(
-    relay_addr: SocketAddr,
+    relay_addr: &str,
     room_id: &str,
     role: &str,
     token: &str,
 ) -> Result<TcpStream> {
-    let mut stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(relay_addr))
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(relay_addr))
         .await
-        .map_err(|_| anyhow!("relay connect timeout"))??;
-    stream.set_nodelay(true).ok();
+        .map_err(|_| anyhow!("relay connect timeout (addr={})", relay_addr))??;
+    tune(&stream);
 
     let line = format!("RELAY {} {} {}\n", room_id, role, token);
+    let mut stream = stream;
     stream.write_all(line.as_bytes()).await?;
     stream.flush().await?;
 
@@ -72,10 +101,10 @@ async fn dial_and_auth(
 /// connection is successfully consumed by a peer. Used by telemetry
 /// to fire the `connected` checkpoint.
 pub async fn host_pool(
-    relay_addr: SocketAddr,
+    relay_addr: String,
     room_id: String,
     token: String,
-    mc_addr: SocketAddr,
+    mc_addr: std::net::SocketAddr,
     pool_size: usize,
     cancel: CancellationToken,
     on_first_pair: impl Fn() + Send + Sync + 'static,
@@ -84,37 +113,38 @@ pub async fn host_pool(
     let on_first_pair = Arc::new(on_first_pair);
 
     loop {
-        if cancel.is_cancelled() {
-            break;
-        }
-        // Block until a park slot is free.
+        if cancel.is_cancelled() { break; }
         let permit = match sem.clone().acquire_owned().await {
             Ok(p) => p,
-            Err(_) => break, // semaphore closed
+            Err(_) => break,
         };
 
         let cancel2 = cancel.clone();
         let room_id = room_id.clone();
         let token = token.clone();
+        let relay_addr = relay_addr.clone();
         let on_first_pair = on_first_pair.clone();
 
         tokio::spawn(async move {
-            let permit = permit; // moved here; dropped on first activity or error
-            match park_one(relay_addr, &room_id, &token, cancel2.clone()).await {
+            let permit = permit; // dropped on first activity or error
+            match park_one(&relay_addr, &room_id, &token, cancel2.clone()).await {
                 Ok(Some(stream)) => {
                     on_first_pair();
-                    drop(permit); // free slot now that we transitioned to active
-                    if let Err(e) = host_pipe_to_mc(stream, mc_addr).await {
-                        debug!("relay host pipe ended: {}", e);
+                    drop(permit);
+                    let peer_label = stream
+                        .peer_addr()
+                        .map(|a| a.to_string())
+                        .unwrap_or_else(|_| "?".into());
+                    info!("relay: host-side session paired (relay peer={})", peer_label);
+                    match host_pipe_to_mc(stream, mc_addr).await {
+                        Ok(()) => info!("relay: host-side session ended cleanly"),
+                        Err(e) => warn!("relay: host-side session ended: {}", e),
                     }
                 }
-                Ok(None) => {
-                    drop(permit);
-                }
+                Ok(None) => { drop(permit); }
                 Err(e) => {
                     drop(permit);
-                    debug!("relay park error: {}", e);
-                    // Soft backoff so we don't hammer a broken relay.
+                    warn!("relay: park failed: {}", e);
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
@@ -125,7 +155,7 @@ pub async fn host_pool(
 /// Establish a parked connection. Returns `Some(stream)` once the peer
 /// has paired and started sending bytes. Returns `None` if cancelled.
 async fn park_one(
-    relay_addr: SocketAddr,
+    relay_addr: &str,
     room_id: &str,
     token: &str,
     cancel: CancellationToken,
@@ -147,16 +177,22 @@ async fn park_one(
 }
 
 /// Pipe a paired relay stream to the local Minecraft server.
-async fn host_pipe_to_mc(relay_stream: TcpStream, mc_addr: SocketAddr) -> Result<()> {
-    let mc = TcpStream::connect(mc_addr).await?;
-    info!("Relay session active → Minecraft at {}", mc_addr);
+async fn host_pipe_to_mc(
+    relay_stream: TcpStream,
+    mc_addr: std::net::SocketAddr,
+) -> Result<()> {
+    let mc = TcpStream::connect(mc_addr).await
+        .map_err(|e| anyhow!("MC connect at {} failed (is the LAN world still open?): {}", mc_addr, e))?;
+    tune(&mc);
+    info!("relay: piping host-side session → Minecraft at {}", mc_addr);
+
     let (mut r_r, mut r_w) = relay_stream.into_split();
     let (mut m_r, mut m_w) = mc.into_split();
     let r_to_m = tokio::io::copy(&mut r_r, &mut m_w);
     let m_to_r = tokio::io::copy(&mut m_r, &mut r_w);
     tokio::select! {
-        _ = r_to_m => {}
-        _ = m_to_r => {}
+        rv = r_to_m => { let _ = rv.map_err(|e| debug!("relay→MC ended: {}", e)); }
+        rv = m_to_r => { let _ = rv.map_err(|e| debug!("MC→relay ended: {}", e)); }
     }
     Ok(())
 }
@@ -167,26 +203,22 @@ async fn host_pipe_to_mc(relay_stream: TcpStream, mc_addr: SocketAddr) -> Result
 /// through it. Returns when either side disconnects.
 pub async fn join_forward(
     mc_tcp: TcpStream,
-    relay_addr: SocketAddr,
+    relay_addr: &str,
     room_id: &str,
     token: &str,
 ) -> Result<()> {
+    tune(&mc_tcp);
     let relay_stream = dial_and_auth(relay_addr, room_id, "join", token).await?;
-    info!("Relay session active for Minecraft client");
+    info!("relay: join-side session opened for one Minecraft connection");
+
     let (mut mc_r, mut mc_w) = mc_tcp.into_split();
     let (mut r_r, mut r_w) = relay_stream.into_split();
     let mc_to_r = tokio::io::copy(&mut mc_r, &mut r_w);
     let r_to_mc = tokio::io::copy(&mut r_r, &mut mc_w);
     tokio::select! {
-        r = mc_to_r => { let _ = r; }
-        r = r_to_mc => { let _ = r; }
+        rv = mc_to_r => { let _ = rv.map_err(|e| debug!("MC→relay ended: {}", e)); }
+        rv = r_to_mc => { let _ = rv.map_err(|e| debug!("relay→MC ended: {}", e)); }
     }
+    info!("relay: join-side session closed");
     Ok(())
-}
-
-// ── Convenience: log a one-shot warning when relay isn't reachable ───────────
-
-#[allow(dead_code)]
-pub fn warn_unreachable(relay_addr: SocketAddr, err: &str) {
-    warn!("relay {} unreachable: {}", relay_addr, err);
 }

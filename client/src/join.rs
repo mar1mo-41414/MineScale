@@ -136,6 +136,9 @@ async fn run_inner(
             token: room.relay_token.clone(),
         }
     });
+    if relay_fallback.is_none() {
+        tracing::warn!("relay disabled: bad relay address {:?}", room.relay_addr);
+    }
 
     let cancel = config.cancel.clone();
 

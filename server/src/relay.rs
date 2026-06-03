@@ -47,6 +47,7 @@ pub async fn run_relay(listener: TcpListener, registry: Registry) {
     loop {
         match listener.accept().await {
             Ok((stream, addr)) => {
+                tune(&stream);
                 let registry = registry.clone();
                 let parkers = Arc::clone(&parkers);
                 tokio::spawn(async move {
@@ -58,6 +59,20 @@ pub async fn run_relay(listener: TcpListener, registry: Registry) {
             Err(e) => warn!("relay accept error: {}", e),
         }
     }
+}
+
+/// Tune an accepted TCP stream:
+///   - TCP_NODELAY so Minecraft's small packets aren't Nagle-buffered
+///   - TCP keepalive so middlebox-dropped parked sockets are reaped
+///     within ~2 minutes instead of the 2-hour kernel default
+fn tune(stream: &TcpStream) {
+    use socket2::{SockRef, TcpKeepalive};
+    let _ = stream.set_nodelay(true);
+    let ka = TcpKeepalive::new()
+        .with_time(Duration::from_secs(45))
+        .with_interval(Duration::from_secs(15))
+        .with_retries(4);
+    let _ = SockRef::from(stream).set_tcp_keepalive(&ka);
 }
 
 async fn handle(mut stream: TcpStream, registry: Registry, parkers: Parkers) -> Result<()> {

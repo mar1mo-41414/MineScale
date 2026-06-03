@@ -374,7 +374,9 @@ async fn forward_to_minecraft(
 /// Fallback parameters when QUIC fails on the join side.
 #[derive(Clone)]
 pub struct RelayFallback {
-    pub addr: SocketAddr,
+    /// Relay endpoint as a "host:port" string. Resolved at connect time so
+    /// DNS changes / IPv6 fallback work without restarting.
+    pub addr: String,
     pub room_id: String,
     pub token: String,
 }
@@ -465,7 +467,7 @@ pub async fn run_join(
                         let r = relay_fallback.clone().unwrap();
                         tokio::spawn(async move {
                             if let Err(e) = crate::relay::join_forward(
-                                tcp_stream, r.addr, &r.room_id, &r.token,
+                                tcp_stream, &r.addr, &r.room_id, &r.token,
                             ).await {
                                 warn!("Relay forward error: {}", e);
                             }
