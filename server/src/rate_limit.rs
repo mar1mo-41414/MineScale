@@ -19,9 +19,15 @@ pub fn join_attempt_limiter() -> KeyedLimiter {
     )))
 }
 
-/// 20 peer-poll requests per IP per minute.
+/// Peer-poll rate limit.
+///
+/// The host polls every 3 s while waiting for joiners, so a 20/min cap
+/// (the old value) was hit almost exactly after 130 s of waiting.
+/// Allow 2/s steady state with a burst of 5 — comfortably above the
+/// 0.33/s the host actually produces, while still rejecting flood.
 pub fn poll_limiter() -> KeyedLimiter {
-    Arc::new(RateLimiter::keyed(Quota::per_minute(
-        NonZeroU32::new(20).unwrap(),
-    )))
+    Arc::new(RateLimiter::keyed(
+        Quota::per_second(NonZeroU32::new(2).unwrap())
+            .allow_burst(NonZeroU32::new(5).unwrap()),
+    ))
 }

@@ -1,4 +1,4 @@
-use crate::{cli::JoinArgs, coord, crypto, diag, lan, stun, telemetry, tunnel};
+use crate::{cli::JoinArgs, coord, crypto, diag, lan, relay, stun, telemetry, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
@@ -107,12 +107,11 @@ async fn run_inner(
 
     print_connected(local_port);
 
-    // ── 7. QUIC tunnel ────────────────────────────────────────────────────────
-    // on_connected fires INSIDE run_join, after QUIC is established and the
-    // TCP listener is bound — guaranteeing Minecraft won't see Connection refused.
-    // We chain a telemetry checkpoint into it so the `connected` event is
-    // recorded the moment the tunnel is usable — even if the user kills
-    // the window without a clean disconnect.
+    // ── 7. QUIC tunnel (with relay fallback) ──────────────────────────────────
+    // on_connected fires INSIDE run_join, after a usable transport is selected
+    // (QUIC or relay) AND the local TCP listener is bound — guaranteeing
+    // Minecraft won't see Connection refused. The telemetry checkpoint is
+    // chained so it fires the moment the tunnel is usable.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
     let user_on_connected = config.on_connected.take();
     let report_for_cb = report.clone();
@@ -123,10 +122,29 @@ async fn run_inner(
                 report_for_cb.send_event(telemetry::Phase::Connected).await;
             });
         }));
+
+    let report_for_transport = report.clone();
+    let on_transport: Option<Box<dyn FnOnce(&str) + Send>> =
+        Some(Box::new(move |t: &str| {
+            let mut r = report_for_transport;
+            r.set_transport(t);
+        }));
+
+    let relay_fallback = relay::parse_relay_addr(&room.relay_addr).ok().map(|addr| {
+        tunnel::RelayFallback {
+            addr,
+            room_id: room_id.clone(),
+            token: room.relay_token.clone(),
+        }
+    });
+
     let cancel = config.cancel.clone();
 
     tokio::select! {
-        r = tunnel::run_join(udp_socket, host_addr, cert_fingerprint, local_addr, on_connected) => r?,
+        r = tunnel::run_join(
+            udp_socket, host_addr, cert_fingerprint, local_addr,
+            relay_fallback, on_connected, on_transport,
+        ) => r?,
         _ = cancel.cancelled() => {}
     }
 

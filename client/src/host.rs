@@ -1,4 +1,4 @@
-use crate::{cli::HostArgs, coord, crypto, diag, lan, stun, telemetry, tunnel};
+use crate::{cli::HostArgs, coord, crypto, diag, lan, relay, stun, telemetry, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
@@ -119,21 +119,75 @@ async fn run_inner(
     // ── 6. Hole punch with first joiner ───────────────────────────────────────
     let first_addr: std::net::SocketAddr = first_peer.join_stun.parse()?;
     tunnel::punch_holes(&udp_socket, first_addr).await?;
-    report.send_event(telemetry::Phase::Connected).await;
 
-    // ── 7. Start QUIC server ──────────────────────────────────────────────────
+    // ── 7. Start QUIC server + relay park pool ────────────────────────────────
     let mc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", mc_port).parse()?;
     info!("Forwarding to Minecraft at {}", mc_addr);
     println!("\n  Friend connected! Tunnelling to 127.0.0.1:{} …\n", mc_port);
     println!("  (The same link can be shared with more friends)\n");
 
+    // The `Connected` checkpoint should fire only when a joiner has
+    // actually reached us — either over QUIC or over relay. Whichever
+    // side wins fires it first; subsequent fires are idempotent.
+    let connected_flag = report.connected_flag.clone();
+    let report_for_quic = report.clone();
+    let report_for_relay = report.clone();
+
+    let on_quic_connect: Box<dyn Fn() + Send + Sync> = {
+        let cf = connected_flag.clone();
+        Box::new(move || {
+            if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                let r = report_for_quic.clone();
+                tokio::spawn(async move {
+                    let mut r = r;
+                    r.set_transport("quic");
+                    r.send_event(telemetry::Phase::Connected).await;
+                });
+            }
+        })
+    };
+
+    // Spawn the relay park pool if the coordination server gave us a
+    // reachable relay address. The pool maintains 2 parked connections
+    // so that up to two joiners can fall back to relay in parallel.
+    let cancel = config.cancel.clone();
+    if let Ok(relay_addr) = relay::parse_relay_addr(&room.relay_addr) {
+        let cf = connected_flag.clone();
+        let report_relay = report_for_relay.clone();
+        let room_id = room.room_id.clone();
+        let token = room.relay_token.clone();
+        let cancel_relay = cancel.clone();
+        tokio::spawn(async move {
+            relay::host_pool(
+                relay_addr,
+                room_id,
+                token,
+                mc_addr,
+                2,
+                cancel_relay,
+                move || {
+                    if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        let r = report_relay.clone();
+                        tokio::spawn(async move {
+                            let mut r = r;
+                            r.set_transport("relay");
+                            r.send_event(telemetry::Phase::Connected).await;
+                        });
+                    }
+                },
+            )
+            .await;
+        });
+    } else {
+        tracing::warn!("relay disabled: bad relay address {:?}", room.relay_addr);
+    }
+
     // Channel: poll_more_joiners → run_host, so run_host can poke new joiners
     // from the QUIC port (required for Port-Restricted Cone NAT).
     let (joiner_tx, joiner_rx) = tokio::sync::mpsc::unbounded_channel();
-    let cancel = config.cancel.clone();
 
     tokio::select! {
-        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx) => r?,
+        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx, Some(on_quic_connect)) => r?,
         _ = poll_more_joiners(
                 coord,
                 room.room_id.clone(),

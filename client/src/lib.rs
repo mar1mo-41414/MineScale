@@ -5,6 +5,7 @@ pub mod crypto;
 pub mod host;
 pub mod join;
 pub mod lan;
+pub mod relay;
 pub mod stun;
 pub mod telemetry;
 pub mod tunnel;

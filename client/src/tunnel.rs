@@ -232,16 +232,24 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// Accepts an *unlimited* number of QUIC connections (one per joiner).
 /// New joiner addresses received on `new_joiners_rx` are poked from the
 /// QUIC endpoint to open the host's NAT before the joiner attempts to connect.
+///
+/// `on_first_connect` fires exactly once when the first joiner completes a
+/// QUIC handshake. The host telemetry reporter uses this to record the
+/// `Connected` checkpoint at the moment the tunnel is actually usable,
+/// rather than optimistically after `punch_holes` returns.
 pub async fn run_host(
     socket: UdpSocket,
     _peer_addr: SocketAddr,
     cert_key: rcgen::CertifiedKey,
     mc_addr: SocketAddr,
     mut new_joiners_rx: tokio::sync::mpsc::UnboundedReceiver<SocketAddr>,
+    on_first_connect: Option<Box<dyn Fn() + Send + Sync>>,
 ) -> Result<()> {
     let std_socket = socket.into_std()?;
     let endpoint = build_server_endpoint(std_socket, &cert_key)?;
     info!("QUIC server ready — accepting connections");
+
+    let on_first_connect = on_first_connect.map(Arc::new);
 
     loop {
         tokio::select! {
@@ -249,10 +257,12 @@ pub async fn run_host(
             incoming = endpoint.accept() => {
                 let connecting = incoming
                     .ok_or_else(|| anyhow!("QUIC endpoint closed"))?;
+                let cb = on_first_connect.clone();
                 tokio::spawn(async move {
                     match connecting.await {
                         Ok(conn) => {
                             info!("Joiner connected via QUIC from {}", conn.remote_address());
+                            if let Some(cb) = cb { cb(); }
                             // Handle all Minecraft streams on this connection.
                             loop {
                                 match conn.accept_bi().await {
@@ -304,30 +314,79 @@ async fn forward_to_minecraft(
 
 // ── Joiner tunnel ─────────────────────────────────────────────────────────────
 
+/// Fallback parameters when QUIC fails on the join side.
+#[derive(Clone)]
+pub struct RelayFallback {
+    pub addr: SocketAddr,
+    pub room_id: String,
+    pub token: String,
+}
+
 /// Run the joiner side of the tunnel.
-/// Accept local TCP connections from Minecraft client, open QUIC streams to host.
 ///
-/// `on_connected` is called *after* both the QUIC connection and the local TCP
-/// listener are ready — i.e. when it is actually safe for Minecraft to connect.
+/// Tries QUIC first. If QUIC handshake fails (most commonly because the
+/// joiner sits behind Symmetric NAT and hole punching couldn't predict
+/// the remote port), falls back to the TCP relay when `relay_fallback`
+/// is supplied.
+///
+/// `on_connected` fires once when the local TCP listener is bound AND a
+/// usable transport (QUIC or relay) is selected — i.e. when it is safe
+/// for Minecraft to connect. `on_transport` is informational, used by
+/// telemetry to record which path was chosen.
 pub async fn run_join(
     socket: UdpSocket,
     host_addr: SocketAddr,
     cert_fingerprint: Vec<u8>,
     local_addr: SocketAddr,
+    relay_fallback: Option<RelayFallback>,
     on_connected: Option<Box<dyn FnOnce(u16) + Send>>,
+    on_transport: Option<Box<dyn FnOnce(&str) + Send>>,
 ) -> Result<()> {
+    const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
     let std_socket = socket.into_std()?;
     let endpoint = build_client_endpoint(std_socket, cert_fingerprint)?;
 
-    info!("Connecting to host via QUIC at {}…", host_addr);
-    let conn = endpoint.connect(host_addr, "minescale")?.await?;
-    info!("P2P tunnel established");
+    info!("Connecting to host via QUIC at {} (timeout {}s)…", host_addr, QUIC_CONNECT_TIMEOUT.as_secs());
+    let quic_conn = match endpoint.connect(host_addr, "minescale") {
+        Ok(connecting) => {
+            match tokio::time::timeout(QUIC_CONNECT_TIMEOUT, connecting).await {
+                Ok(Ok(c)) => {
+                    info!("P2P tunnel established (QUIC)");
+                    Some(c)
+                }
+                Ok(Err(e)) => {
+                    warn!("QUIC handshake failed: {}", e);
+                    None
+                }
+                Err(_) => {
+                    warn!("QUIC handshake timed out after {}s", QUIC_CONNECT_TIMEOUT.as_secs());
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            warn!("QUIC connect setup failed: {}", e);
+            None
+        }
+    };
+
+    let mode = match (&quic_conn, &relay_fallback) {
+        (Some(_), _) => "quic",
+        (None, Some(_)) => {
+            info!("Falling back to relay");
+            "relay"
+        }
+        (None, None) => {
+            return Err(anyhow!("QUIC failed and no relay fallback available"));
+        }
+    };
+    if let Some(cb) = on_transport { cb(mode); }
 
     let listener = tokio::net::TcpListener::bind(local_addr).await?;
     let bound_port = listener.local_addr()?.port();
-    info!("Minecraft proxy ready on 0.0.0.0:{}", bound_port);
+    info!("Minecraft proxy ready on 0.0.0.0:{} (transport={})", bound_port, mode);
 
-    // Signal readiness only now — QUIC is up and TCP listener is bound.
     if let Some(cb) = on_connected {
         cb(bound_port);
     }
@@ -336,12 +395,26 @@ pub async fn run_join(
         match listener.accept().await {
             Ok((tcp_stream, peer)) => {
                 debug!("Minecraft client connected from {}", peer);
-                let conn = conn.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = forward_from_minecraft(tcp_stream, conn).await {
-                        warn!("Join stream error: {}", e);
+                match &quic_conn {
+                    Some(conn) => {
+                        let conn = conn.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = forward_from_minecraft(tcp_stream, conn).await {
+                                warn!("Join stream error: {}", e);
+                            }
+                        });
                     }
-                });
+                    None => {
+                        let r = relay_fallback.clone().unwrap();
+                        tokio::spawn(async move {
+                            if let Err(e) = crate::relay::join_forward(
+                                tcp_stream, r.addr, &r.room_id, &r.token,
+                            ).await {
+                                warn!("Relay forward error: {}", e);
+                            }
+                        });
+                    }
+                }
             }
             Err(e) => return Err(e.into()),
         }

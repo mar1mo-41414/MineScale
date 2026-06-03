@@ -15,6 +15,8 @@
 //!     writing to the log.
 
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCHEMA: u32 = 1;
@@ -57,7 +59,6 @@ pub enum Outcome {
 
 #[derive(Clone)]
 pub struct Reporter {
-    // (See helpers below.)
     pub enabled: bool,
     pub base_url: String,
     pub session_id: String,
@@ -71,6 +72,14 @@ pub struct Reporter {
 
     // Pairing key (room ID) — set as soon as it is known.
     pub room_id: Option<String>,
+
+    // Transport used for the connection (set when known: "quic" or "relay").
+    pub transport: Option<String>,
+
+    // Set the moment the `Connected` checkpoint passes. Used by the
+    // terminal-event classifier to distinguish "user cancelled before
+    // anything worked" from a genuine success.
+    pub connected_flag: Arc<AtomicBool>,
 }
 
 impl Reporter {
@@ -85,6 +94,8 @@ impl Reporter {
             nat_type: None,
             ipv6_available: None,
             room_id: None,
+            transport: None,
+            connected_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -97,12 +108,23 @@ impl Reporter {
         self.ipv6_available = Some(ipv6);
     }
 
+    pub fn set_transport(&mut self, transport: &str) {
+        self.transport = Some(transport.to_string());
+    }
+
+    pub fn was_connected(&self) -> bool {
+        self.connected_flag.load(Ordering::Relaxed)
+    }
+
     pub async fn send_start(&self) { self.send_event(Phase::Start).await; }
 
     /// Mid-session checkpoint (room registered / connection established).
     /// Each milestone is sent immediately so we have data even if the
     /// process is killed without a clean shutdown.
     pub async fn send_event(&self, phase: Phase) {
+        if phase == Phase::Connected {
+            self.connected_flag.store(true, Ordering::Relaxed);
+        }
         if !self.enabled { return; }
         let body = self.base_payload(phase, None, None);
         Self::post(&self.base_url, body).await;
@@ -110,7 +132,14 @@ impl Reporter {
 
     pub async fn send_result(&self, outcome: Outcome, detail: Option<&str>) {
         if !self.enabled { return; }
-        let body = self.base_payload(Phase::Result, Some(outcome), detail);
+        // Promote a "success without ever reaching Connected" to Cancelled —
+        // it means the user pulled the plug before the tunnel was usable.
+        let effective = if outcome == Outcome::Success && !self.was_connected() {
+            Outcome::Cancelled
+        } else {
+            outcome
+        };
+        let body = self.base_payload(Phase::Result, Some(effective), detail);
         Self::post(&self.base_url, body).await;
     }
 
@@ -141,6 +170,7 @@ impl Reporter {
             "arch": std::env::consts::ARCH,
             "app_version": env!("CARGO_PKG_VERSION"),
             "app_kind": self.app_kind,
+            "transport": self.transport,
         })
     }
 

@@ -5,6 +5,7 @@ mod diag;
 mod host;
 mod join;
 mod lan;
+mod relay;
 mod stun;
 mod telemetry;
 mod tunnel;
