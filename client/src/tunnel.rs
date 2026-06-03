@@ -111,7 +111,7 @@ fn build_server_endpoint(
     std_socket: std::net::UdpSocket,
     cert_key: &rcgen::CertifiedKey,
 ) -> Result<quinn::Endpoint> {
-    use quinn::crypto::rustls::QuicServerConfig;
+    use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
     let cert_der: CertificateDer = cert_key.cert.der().clone();
@@ -128,14 +128,71 @@ fn build_server_endpoint(
 
     let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
 
-    let endpoint = quinn::Endpoint::new(
+    let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
         Some(server_config),
         std_socket,
         Arc::new(quinn::TokioRuntime),
     )?;
 
+    // ── NAT-poke client config ───────────────────────────────────────────────
+    // The host occasionally calls endpoint.connect() to send INITIAL packets
+    // outbound to a new joiner's address, opening its own Port-Restricted Cone
+    // NAT entry for that joiner. Quinn refuses connect() without a default
+    // client config — install a permissive one (handshake will fail by design
+    // since the joiner is a QUIC server, not a client, but the INITIAL packet
+    // *will* leave our NAT, which is the whole point).
+    let mut poke_tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth();
+    poke_tls.alpn_protocols = vec![b"minescale-1".to_vec()];
+    let poke_client = QuicClientConfig::try_from(poke_tls)
+        .map_err(|e| anyhow!("poke QuicClientConfig: {}", e))?;
+    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(poke_client)));
+
     Ok(endpoint)
+}
+
+/// Certificate verifier used ONLY for the NAT-poke client config in
+/// `build_server_endpoint`. We never reach the cert-validation phase of the
+/// handshake — the poke just needs the INITIAL packet to leave our NAT —
+/// so this verifier's leniency has no security impact.
+#[derive(Debug)]
+struct AcceptAnyCert;
+
+impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _: &[u8],
+        _: &rustls::pki_types::CertificateDer<'_>,
+        _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 fn build_client_endpoint(

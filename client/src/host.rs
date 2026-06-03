@@ -220,7 +220,7 @@ async fn poll_more_joiners(
         if tokio::time::Instant::now() >= deadline { return; }
 
         match coord.poll_peers(&room_id, &host_token, next_idx).await {
-            Ok(peers) => {
+            Ok(Some(peers)) => {
                 for peer in peers {
                     if let Ok(addr) = peer.join_stun.parse() {
                         info!("New joiner #{} detected at {} — sending to QUIC poke task", peer.idx, addr);
@@ -230,6 +230,14 @@ async fn poll_more_joiners(
                         next_idx = peer.idx + 1;
                     }
                 }
+            }
+            Ok(None) => {
+                // 404 — the coord server expired the room (15 min lifetime).
+                // No more joiners are possible; stop polling cleanly.
+                info!("Room {} has expired on the coordination server — \
+                      no more joiners can connect (the share link is now dead). \
+                      Existing connections remain active.", room_id);
+                return;
             }
             Err(e) => tracing::warn!("poll_more_joiners: {}", e),
         }

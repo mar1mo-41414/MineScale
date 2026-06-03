@@ -79,23 +79,28 @@ impl Client {
 
     /// Poll for new joiners with index >= after_idx.
     /// Returns immediately with however many new joiners exist (may be empty).
+    /// Returns `Ok(None)` when the room has expired / no longer exists
+    /// (HTTP 404), so callers can stop polling cleanly.
     pub async fn poll_peers(
         &self,
         room_id: &str,
         host_token: &str,
         after_idx: usize,
-    ) -> Result<Vec<IndexedPeer>> {
+    ) -> Result<Option<Vec<IndexedPeer>>> {
         let url = format!(
             "{}/api/v1/rooms/{}/peers?after={}",
             self.base_url, room_id, after_idx
         );
         let resp = self.http.get(&url).bearer_auth(host_token).send().await?;
+        if resp.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
         if !resp.status().is_success() {
             let s = resp.status();
             return Err(anyhow!("poll_peers {}: {}", s, resp.text().await.unwrap_or_default()));
         }
         let body: PollPeersResponse = resp.json().await?;
-        Ok(body.peers)
+        Ok(Some(body.peers))
     }
 
     /// Wait until at least one new joiner appears (polls every 2 s until timeout).
@@ -111,7 +116,10 @@ impl Client {
             if tokio::time::Instant::now() >= deadline {
                 return Err(anyhow!("Timed out waiting for someone to join"));
             }
-            let peers = self.poll_peers(room_id, host_token, after_idx).await?;
+            let peers = match self.poll_peers(room_id, host_token, after_idx).await? {
+                Some(p) => p,
+                None => return Err(anyhow!("Room expired before anyone joined")),
+            };
             if let Some(first) = peers.into_iter().next() {
                 return Ok(first);
             }

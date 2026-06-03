@@ -34,7 +34,11 @@ const RELAY_PARK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MAX_AUTH_LINE: usize = 256;
 const MC_HANDSHAKE_PACKET_ID: u8 = 0x00;
 
-type Parkers = Arc<Mutex<HashMap<String, VecDeque<TcpStream>>>>;
+// Each parked stream carries a unique id so the per-stream timeout
+// task can remove that *specific* stream — popping from the front of
+// the queue (as we used to) would mistakenly drop a still-valid
+// later-arriving stream once the queue had rotated.
+type Parkers = Arc<Mutex<HashMap<String, VecDeque<(u64, TcpStream)>>>>;
 
 pub async fn run_relay(listener: TcpListener, registry: Registry) {
     info!("Relay server listening on {}", listener.local_addr().unwrap());
@@ -87,10 +91,12 @@ async fn handle(mut stream: TcpStream, registry: Registry, parkers: Parkers) -> 
     let opposite_key = format!("{}:{}", room_id, opposite);
     let my_key = format!("{}:{}", room_id, role);
 
-    // Try to pop a parked partner first.
+    // Try to pop a parked partner first (oldest first — FIFO).
     let partner = {
         let mut map = parkers.lock().await;
-        map.get_mut(&opposite_key).and_then(|q| q.pop_front())
+        map.get_mut(&opposite_key)
+            .and_then(|q| q.pop_front())
+            .map(|(_id, s)| s)
     };
 
     if let Some(partner) = partner {
@@ -105,21 +111,26 @@ async fn handle(mut stream: TcpStream, registry: Registry, parkers: Parkers) -> 
     }
 
     // We are first — park ourselves until the partner arrives or we time out.
+    let park_id: u64 = rand::random();
     {
         let mut map = parkers.lock().await;
-        map.entry(my_key.clone()).or_default().push_back(stream);
+        map.entry(my_key.clone()).or_default().push_back((park_id, stream));
     }
-    info!("relay parked room={} role={}", room_id, role);
+    info!("relay parked room={} role={} id={:016x}", room_id, role, park_id);
 
     // Schedule a cleanup so a never-paired stream is dropped eventually.
+    // We remove by id, not by position — popping from the front is wrong
+    // once other parks have arrived after us.
     let parkers2 = parkers.clone();
     let my_key2 = my_key.clone();
     tokio::spawn(async move {
         tokio::time::sleep(RELAY_PARK_TIMEOUT).await;
         let mut map = parkers2.lock().await;
         if let Some(q) = map.get_mut(&my_key2) {
-            if q.pop_front().is_some() {
-                warn!("relay park timeout: {}", my_key2);
+            let before = q.len();
+            q.retain(|(id, _)| *id != park_id);
+            if q.len() < before {
+                warn!("relay park timeout: {} id={:016x}", my_key2, park_id);
             }
             if q.is_empty() {
                 map.remove(&my_key2);
