@@ -453,7 +453,7 @@ pub async fn run_join(
     loop {
         match listener.accept().await {
             Ok((tcp_stream, peer)) => {
-                debug!("Minecraft client connected from {}", peer);
+                info!("Minecraft client connected from {} (transport={})", peer, mode);
                 match &quic_conn {
                     Some(conn) => {
                         let conn = conn.clone();

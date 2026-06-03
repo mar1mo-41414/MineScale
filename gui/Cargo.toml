@@ -1,6 +1,6 @@
 [package]
 name        = "mc-share-gui"
-version     = "1.2.5"
+version     = "1.2.6"
 edition     = "2021"
 description = "MineScale-Java — GUI client"
 

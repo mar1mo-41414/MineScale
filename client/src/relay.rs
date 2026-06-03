@@ -181,19 +181,26 @@ async fn host_pipe_to_mc(
     relay_stream: TcpStream,
     mc_addr: std::net::SocketAddr,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     let mc = TcpStream::connect(mc_addr).await
         .map_err(|e| anyhow!("MC connect at {} failed (is the LAN world still open?): {}", mc_addr, e))?;
     tune(&mc);
-    info!("relay: piping host-side session → Minecraft at {}", mc_addr);
+    let connect_ms = started.elapsed().as_millis();
+    info!("relay: piping host-side session → Minecraft at {} (mc-connect={}ms)", mc_addr, connect_ms);
 
     let (mut r_r, mut r_w) = relay_stream.into_split();
     let (mut m_r, mut m_w) = mc.into_split();
     let r_to_m = tokio::io::copy(&mut r_r, &mut m_w);
     let m_to_r = tokio::io::copy(&mut m_r, &mut r_w);
-    tokio::select! {
-        rv = r_to_m => { let _ = rv.map_err(|e| debug!("relay→MC ended: {}", e)); }
-        rv = m_to_r => { let _ = rv.map_err(|e| debug!("MC→relay ended: {}", e)); }
-    }
+    let (which, bytes) = tokio::select! {
+        rv = r_to_m => ("relay→MC", rv.unwrap_or(0)),
+        rv = m_to_r => ("MC→relay", rv.unwrap_or(0)),
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    info!(
+        "relay: host-side session ended after {}ms — {} reached EOF, total {} bytes one-way",
+        elapsed_ms, which, bytes
+    );
     Ok(())
 }
 
@@ -207,18 +214,24 @@ pub async fn join_forward(
     room_id: &str,
     token: &str,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     tune(&mc_tcp);
     let relay_stream = dial_and_auth(relay_addr, room_id, "join", token).await?;
-    info!("relay: join-side session opened for one Minecraft connection");
+    let dial_ms = started.elapsed().as_millis();
+    info!("relay: join-side session opened (dial={}ms) — waiting for Minecraft traffic", dial_ms);
 
     let (mut mc_r, mut mc_w) = mc_tcp.into_split();
     let (mut r_r, mut r_w) = relay_stream.into_split();
     let mc_to_r = tokio::io::copy(&mut mc_r, &mut r_w);
     let r_to_mc = tokio::io::copy(&mut r_r, &mut mc_w);
-    tokio::select! {
-        rv = mc_to_r => { let _ = rv.map_err(|e| debug!("MC→relay ended: {}", e)); }
-        rv = r_to_mc => { let _ = rv.map_err(|e| debug!("relay→MC ended: {}", e)); }
-    }
-    info!("relay: join-side session closed");
+    let (which, bytes) = tokio::select! {
+        rv = mc_to_r => ("MC→relay", rv.unwrap_or(0)),
+        rv = r_to_mc => ("relay→MC", rv.unwrap_or(0)),
+    };
+    let elapsed_ms = started.elapsed().as_millis();
+    info!(
+        "relay: join-side session closed after {}ms — {} reached EOF, total {} bytes one-way",
+        elapsed_ms, which, bytes
+    );
     Ok(())
 }
