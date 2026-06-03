@@ -9,6 +9,23 @@ use std::sync::{Arc, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() -> eframe::Result<()> {
+    // Minimal CLI args. Env var MC_SHARE_TELEMETRY=1 also works on the
+    // platforms that support it, but Windows users find the flag form
+    // easier (no shell prefix syntax to deal with).
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("MineScale-Java GUI\n");
+        println!("USAGE:");
+        println!("  mc-share-gui [--telemetry]\n");
+        println!("OPTIONS:");
+        println!("  --telemetry   Send anonymous connection diagnostics to the");
+        println!("                coordination server. Off by default. See README");
+        println!("                section \"接続調査への協力について\" for details.");
+        println!("  -h, --help    Show this help and exit.");
+        return Ok(());
+    }
+    let telemetry_flag = args.iter().any(|a| a == "--telemetry");
+
     // Shared log buffer — filled by the tracing layer, read by the GUI.
     let log: Arc<Mutex<Vec<LogEntry>>> = Arc::new(Mutex::new(Vec::new()));
 
@@ -36,6 +53,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "MineScale-Java",
         native_options,
-        Box::new(move |_cc| Ok(Box::new(app::App::new(rt, log)) as Box<dyn eframe::App>)),
+        Box::new(move |_cc| Ok(Box::new(app::App::new(rt, log, telemetry_flag)) as Box<dyn eframe::App>)),
     )
 }

@@ -1,6 +1,6 @@
 [package]
 name        = "mc-share"
-version     = "1.2.1"
+version     = "1.2.2"
 edition     = "2021"
 description = "Minecraft Java Edition P2P World Sharing — no port forwarding, no accounts"
 

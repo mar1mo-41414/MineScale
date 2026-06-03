@@ -212,9 +212,13 @@ MineScale-Java は「どの NAT 構成・OS で接続が成功／失敗するか
 mc-share host --telemetry
 mc-share join <URL> --telemetry
 
-# 環境変数（GUI / CLI 共通）
-MC_SHARE_TELEMETRY=1 ./mc-share-gui
+# GUI（フラグでも環境変数でも OK）
+./mc-share-gui --telemetry
+MC_SHARE_TELEMETRY=1 ./mc-share-gui      # Windows 以外
 ```
+
+> Windows のエクスプローラからダブルクリック起動する場合は、
+> 起動用ショートカットを作って「リンク先」に `--telemetry` を追加する形が一番楽です。
 
 ### 送信される情報（これだけです）
 

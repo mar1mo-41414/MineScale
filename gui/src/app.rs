@@ -105,10 +105,24 @@ pub struct App {
 
     // ── cancellation ─────────────────────────────────────────────────────────
     cancel: Option<CancellationToken>,
+
+    // ── opt-in telemetry flag (set via CLI flag or env var at startup) ──────
+    telemetry_enabled: bool,
 }
 
 impl App {
-    pub fn new(rt: Arc<tokio::runtime::Runtime>, log: Arc<Mutex<Vec<LogEntry>>>) -> Self {
+    pub fn new(
+        rt: Arc<tokio::runtime::Runtime>,
+        log: Arc<Mutex<Vec<LogEntry>>>,
+        telemetry_cli_flag: bool,
+    ) -> Self {
+        // CLI flag wins; otherwise fall back to MC_SHARE_TELEMETRY env var.
+        let telemetry_enabled = mc_share::telemetry::enabled(telemetry_cli_flag);
+        if telemetry_enabled {
+            tracing::info!(
+                "Telemetry enabled (anonymous connection diagnostics — see README)"
+            );
+        }
         Self {
             rt,
             mode: Mode::Host,
@@ -125,6 +139,7 @@ impl App {
             diag_running: false,
             log,
             cancel: None,
+            telemetry_enabled,
         }
     }
 
@@ -157,6 +172,7 @@ impl App {
         let share_cell = Arc::clone(&self.share_url_cell);
         let rt  = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
+        let telemetry_enabled = self.telemetry_enabled;
 
         rt.spawn(async move {
             tracing::info!("Starting host…");
@@ -170,7 +186,7 @@ impl App {
                     if let Ok(mut c) = share_cell.lock() { *c = Some(url); }
                 })),
                 cancel,
-                telemetry: mc_share::telemetry::enabled(false),
+                telemetry: telemetry_enabled,
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
@@ -194,6 +210,7 @@ impl App {
         let port_cell = Arc::clone(&self.local_port_cell);
         let rt   = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
+        let telemetry_enabled = self.telemetry_enabled;
 
         rt.spawn(async move {
             tracing::info!("Joining room…");
@@ -208,7 +225,7 @@ impl App {
                     if let Ok(mut c) = port_cell.lock() { *c = Some(port); }
                 })),
                 cancel,
-                telemetry: mc_share::telemetry::enabled(false),
+                telemetry: telemetry_enabled,
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
