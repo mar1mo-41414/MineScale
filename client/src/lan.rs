@@ -11,36 +11,36 @@ const ANNOUNCE_INTERVAL: Duration = Duration::from_millis(1500);
 /// Broadcast a fake LAN world to the local network so Minecraft's
 /// multiplayer screen shows the world automatically.
 ///
-/// The announce is host-local-only by use of TTL = 0:
-///   - packet is not forwarded out of the host
-///   - multicast loopback (enabled by default) delivers it to local
-///     listeners — including Minecraft running on the same machine
+/// History (so we don't re-learn the same lessons):
+///   - v1.2.6 used TTL=1 on the default interface. Reliable everywhere
+///     but LAN-mates also see the entry.
+///   - v1.2.7 routed via the loopback interface to force source IP =
+///     127.0.0.1 (so MC's LAN-click would handshake as a local client
+///     and bypass online auth). macOS broke this — the local MC missed
+///     packets from loopback multicast.
+///   - v1.2.8 tried default interface with TTL=0, hoping multicast
+///     loopback would still deliver to the local MC while LAN-mates
+///     stayed blind. Empirically, macOS's multicast loopback path is
+///     too flaky for this to be reliable: when the Mac is on a
+///     network with VPN tunnels, the route table sometimes sends
+///     224.0.0.0/4 only out the VPN, and the local MC never sees it.
 ///
-/// We do NOT set the outgoing interface to loopback. Earlier versions
-/// tried that to make the source IP be 127.0.0.1 (so the LAN-entry
-/// click would handshake with "127.0.0.1" and bypass host online-auth),
-/// but on macOS the loopback multicast path was found to be unreliable
-/// — the local Minecraft sometimes didn't receive the announce at all,
-/// and the LAN entry would intermittently fail to appear.
-///
-/// Sending via the default interface with TTL = 0 reliably reaches the
-/// local Minecraft on every supported platform while still preventing
-/// other devices on the physical LAN from seeing the entry.
-///
-/// If the LAN-entry click still doesn't let an offline-mode account
-/// join (host Minecraft sometimes requires online auth depending on
-/// version / settings), the joiner can use Add Server with the Direct
-/// address mc-share-gui displays — that path is always offline-friendly.
+/// We go back to TTL=1 on the default interface. The LAN-mate privacy
+/// loss is acceptable (the joiner's own MC always sees the entry; LAN
+/// mates can see it but can't actually join unless they have an MC
+/// account that the host accepts, and even then they need to know the
+/// joiner is using mc-share). What we cannot afford is the announce
+/// silently not reaching the joiner's own Minecraft.
 pub async fn announce_lan_world(motd: &str, port: u16) -> Result<()> {
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     socket.set_multicast_loop_v4(true)?;
-    socket.set_multicast_ttl_v4(0)?;
+    socket.set_multicast_ttl_v4(1)?;
 
     let announcement = format!("[MOTD]{motd}[/MOTD][AD]{port}[/AD]");
     let target = SocketAddrV4::new(MULTICAST_ADDR, MULTICAST_PORT);
 
     tracing::info!(
-        "Announcing LAN world \"{}\" on multicast {}:{} (host-local, TTL=0)",
+        "Announcing LAN world \"{}\" on multicast {}:{}",
         motd,
         MULTICAST_ADDR,
         MULTICAST_PORT
