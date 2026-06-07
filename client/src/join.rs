@@ -102,21 +102,26 @@ async fn run_inner(
     let local_port = resolve_local_port(config.local_port).await?;
     let local_addr: std::net::SocketAddr = format!("0.0.0.0:{}", local_port).parse()?;
 
-    // ── 6. LAN world announcement ─────────────────────────────────────────────
-    tokio::spawn(lan::announce_lan_world("MineScale World", local_port));
-
     print_connected(local_port);
 
-    // ── 7. QUIC tunnel (with relay fallback) ──────────────────────────────────
+    // ── 6. QUIC tunnel (with relay fallback) ──────────────────────────────────
     // on_connected fires INSIDE run_join, after a usable transport is selected
     // (QUIC or relay) AND the local TCP listener is bound — guaranteeing
-    // Minecraft won't see Connection refused. The telemetry checkpoint is
-    // chained so it fires the moment the tunnel is usable.
+    // Minecraft won't see Connection refused. The telemetry checkpoint AND
+    // the LAN-world multicast announce are chained so they fire the moment
+    // the tunnel is usable.
+    //
+    // The LAN announce is intentionally NOT started earlier: if we
+    // advertised a "LAN world" while the listener was still being set up
+    // (e.g. QUIC 8 s timeout → relay path takes 13 s+ on Sym-host rooms),
+    // Minecraft's first status ping would get TCP "Connection refused"
+    // and silently mark the entry as offline for the rest of the session.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
     let user_on_connected = config.on_connected.take();
     let report_for_cb = report.clone();
     let on_connected: Option<Box<dyn FnOnce(u16) + Send>> =
         Some(Box::new(move |port: u16| {
+            tokio::spawn(lan::announce_lan_world("MineScale World", port));
             if let Some(cb) = user_on_connected { cb(port); }
             tokio::spawn(async move {
                 report_for_cb.send_event(telemetry::Phase::Connected).await;
