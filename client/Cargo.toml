@@ -1,6 +1,6 @@
 [package]
 name        = "mc-share"
-version     = "1.2.10"
+version     = "1.2.11"
 edition     = "2021"
 description = "Minecraft Java Edition P2P World Sharing — no port forwarding, no accounts"
 
@@ -41,3 +41,8 @@ rcgen   = "0.13"
 # Low-level UDP
 socket2    = { version = "0.5", features = ["all"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+
+# Enumerate local IPv4 interfaces so the LAN announce can be sent on
+# every one explicitly — works around macOS routing 224.0.0.0/4 to a
+# VPN tunnel when one is active.
+if-addrs   = "0.13"
