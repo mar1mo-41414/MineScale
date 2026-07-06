@@ -146,6 +146,15 @@ async fn run_inner(
         })
     };
 
+    // A room-expired signal shared between the joiner poller (which
+    // detects the 404 from the coord server) and the relay pool
+    // (which should stop spawning new host-side parks once the room
+    // is dead — otherwise it hammers the relay server for the rest
+    // of the session, one connect per free slot). Existing paired
+    // pipes are unaffected: they own their own TcpStreams and pipe
+    // until game traffic actually stops.
+    let stop_new_parks = tokio_util::sync::CancellationToken::new();
+
     // Spawn the relay park pool if the coordination server gave us a
     // reachable relay address. The pool maintains 4 parked connections
     // so several joiners' simultaneous MC connections (status pings +
@@ -156,7 +165,21 @@ async fn run_inner(
         let report_relay = report_for_relay.clone();
         let room_id = room.room_id.clone();
         let token = room.relay_token.clone();
+        // Pool stops when either the main cancel fires OR the room
+        // expires. Both are represented by the same CancellationToken
+        // API, so we build a combined token: cancel any one of them
+        // and the pool exits its parking loop.
         let cancel_relay = cancel.clone();
+        let stop_parks_for_pool = stop_new_parks.clone();
+        let combined = tokio_util::sync::CancellationToken::new();
+        let combined_child = combined.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel_relay.cancelled() => {}
+                _ = stop_parks_for_pool.cancelled() => {}
+            }
+            combined_child.cancel();
+        });
         tokio::spawn(async move {
             relay::host_pool(
                 relay_addr,
@@ -164,7 +187,7 @@ async fn run_inner(
                 token,
                 mc_addr,
                 4,
-                cancel_relay,
+                combined,
                 move || {
                     if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         let r = report_relay.clone();
@@ -201,6 +224,7 @@ async fn run_inner(
         first_peer.idx + 1,
         poller_cancel,
         joiner_tx,
+        stop_new_parks.clone(),
     ));
 
     let result = tokio::select! {
@@ -223,6 +247,7 @@ async fn poll_more_joiners(
     mut next_idx: usize,
     cancel: tokio_util::sync::CancellationToken,
     joiner_tx: tokio::sync::mpsc::UnboundedSender<std::net::SocketAddr>,
+    stop_new_parks: tokio_util::sync::CancellationToken,
 ) {
     let mut tick = tokio::time::interval(Duration::from_secs(3));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(14 * 60 + 30);
@@ -232,7 +257,13 @@ async fn poll_more_joiners(
             _ = cancel.cancelled() => { return; }
             _ = tick.tick() => {}
         }
-        if tokio::time::Instant::now() >= deadline { return; }
+        if tokio::time::Instant::now() >= deadline {
+            // We won't poll further, and there's no point in the relay
+            // pool trying to park either — the room is (or will very
+            // soon be) gone from the coord's registry.
+            stop_new_parks.cancel();
+            return;
+        }
 
         match coord.poll_peers(&room_id, &host_token, next_idx).await {
             Ok(Some(peers)) => {
@@ -248,10 +279,13 @@ async fn poll_more_joiners(
             }
             Ok(None) => {
                 // 404 — the coord server expired the room (15 min lifetime).
-                // No more joiners are possible; stop polling cleanly.
+                // Stop polling AND signal the relay pool to stop parking:
+                // continued re-parks would just hammer the relay server
+                // with "room not found" for the rest of the session.
                 info!("Room {} has expired on the coordination server — \
                       no more joiners can connect (the share link is now dead). \
                       Existing connections remain active.", room_id);
+                stop_new_parks.cancel();
                 return;
             }
             Err(e) => tracing::warn!("poll_more_joiners: {}", e),

@@ -112,8 +112,27 @@ pub async fn host_pool(
     let sem = Arc::new(Semaphore::new(pool_size));
     let on_first_pair = Arc::new(on_first_pair);
 
+    // Shared backoff across the whole pool. Every successful park
+    // resets it; every failure grows it. Prevents 4 concurrent
+    // parkers from re-dialing 60×/sec against a broken relay.
+    let backoff = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    const BACKOFF_INITIAL_MS: u64 = 500;
+    const BACKOFF_MAX_MS: u64 = 30_000;
+
     loop {
         if cancel.is_cancelled() { break; }
+
+        // Sleep off any pending backoff BEFORE grabbing a permit —
+        // otherwise 4 permit-holders race through and each fail fast.
+        let wait_ms = backoff.load(std::sync::atomic::Ordering::Relaxed);
+        if wait_ms > 0 {
+            let _ = tokio::time::timeout(
+                Duration::from_millis(wait_ms),
+                cancel.cancelled(),
+            ).await;
+            if cancel.is_cancelled() { break; }
+        }
+
         let permit = match sem.clone().acquire_owned().await {
             Ok(p) => p,
             Err(_) => break,
@@ -124,11 +143,13 @@ pub async fn host_pool(
         let token = token.clone();
         let relay_addr = relay_addr.clone();
         let on_first_pair = on_first_pair.clone();
+        let backoff2 = backoff.clone();
 
         tokio::spawn(async move {
             let permit = permit; // dropped on first activity or error
             match park_one(&relay_addr, &room_id, &token, cancel2.clone()).await {
                 Ok(Some(stream)) => {
+                    backoff2.store(0, std::sync::atomic::Ordering::Relaxed);
                     on_first_pair();
                     drop(permit);
                     let peer_label = stream
@@ -144,8 +165,19 @@ pub async fn host_pool(
                 Ok(None) => { drop(permit); }
                 Err(e) => {
                     drop(permit);
-                    warn!("relay: park failed: {}", e);
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    // Exponential backoff, shared across the pool. Only
+                    // warn on the first failure of a burst so we don't
+                    // spam the log during a long stretch of unreachability
+                    // (e.g. relay server temporarily down, or room-gone
+                    // races before the poller has told us to stop).
+                    let prev = backoff2.load(std::sync::atomic::Ordering::Relaxed);
+                    let next = if prev == 0 {
+                        warn!("relay: park failed: {}", e);
+                        BACKOFF_INITIAL_MS
+                    } else {
+                        (prev * 2).min(BACKOFF_MAX_MS)
+                    };
+                    backoff2.store(next, std::sync::atomic::Ordering::Relaxed);
                 }
             }
         });
