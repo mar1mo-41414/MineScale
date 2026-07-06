@@ -185,18 +185,32 @@ async fn run_inner(
     // from the QUIC port (required for Port-Restricted Cone NAT).
     let (joiner_tx, joiner_rx) = tokio::sync::mpsc::unbounded_channel();
 
-    tokio::select! {
-        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx, Some(on_quic_connect)) => r?,
-        _ = poll_more_joiners(
-                coord,
-                room.room_id.clone(),
-                room.host_token.clone(),
-                first_peer.idx + 1,
-                cancel,
-                joiner_tx,
-            ) => {}
-    }
+    // Spawn the joiner poller as a *detached* task. Previously this was
+    // in the same tokio::select! as run_host, which meant the poller
+    // returning (either because the room expired on the coord server or
+    // because it hit its own deadline) would cancel run_host — killing
+    // every existing joiner's tunnel. The room's coord-side lifetime
+    // (~15 min) is completely independent of how long we serve joiners
+    // that already connected; those should keep flowing until the user
+    // stops the host explicitly.
+    let poller_cancel = cancel.clone();
+    let poller = tokio::spawn(poll_more_joiners(
+        coord,
+        room.room_id.clone(),
+        room.host_token.clone(),
+        first_peer.idx + 1,
+        poller_cancel,
+        joiner_tx,
+    ));
 
+    let result = tokio::select! {
+        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx, Some(on_quic_connect)) => r,
+        _ = cancel.cancelled() => Ok(()),
+    };
+
+    // Clean up: stop the poller when we exit.
+    poller.abort();
+    result?;
     Ok(())
 }
 

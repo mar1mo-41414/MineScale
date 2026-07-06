@@ -1993,7 +1993,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mc-share"
-version = "1.2.11"
+version = "1.2.12"
 dependencies = [
  "anyhow",
  "base64",
@@ -2021,7 +2021,7 @@ dependencies = [
 
 [[package]]
 name = "mc-share-gui"
-version = "1.2.11"
+version = "1.2.12"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "mc-share-server"
-version = "1.2.11"
+version = "1.2.12"
 dependencies = [
  "anyhow",
  "axum",
