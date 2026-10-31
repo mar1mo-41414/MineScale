@@ -29,9 +29,10 @@ async fn main() -> Result<()> {
                     .add_directive("mc_share=info".parse()?),
             )
             .with(tracing_subscriber::fmt::layer().without_time())
-            .with(file_log.clone().map(|f| logfile::FileLayer::new(f, false)))
+            .with(file_log.clone().map(|f| logfile::FileLayer::new(f, None)))
             .init();
     }
+    logfile::install_panic_hook();
     if let Some(f) = &file_log {
         tracing::info!("Log file: {}", f.path().display());
     }

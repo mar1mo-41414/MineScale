@@ -64,6 +64,7 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
     probe_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut recv_buf = [0u8; 64];
     let mut grace_deadline: Option<tokio::time::Instant> = None;
+    let mut ticks: u32 = 0;
 
     tokio::time::timeout(HOLE_PUNCH_TIMEOUT, async {
         loop {
@@ -80,7 +81,9 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
                                 grace_deadline = Some(tokio::time::Instant::now() + GRACE_AFTER_RECEIVE);
                             }
                         }
-                        Ok(_) => {}
+                        Ok((len, src)) => {
+                            debug!("punch: ignored a {}-byte datagram from {}", len, src);
+                        }
                         Err(e) if is_transient_udp_error(&e) => {
                             debug!("ignoring transient UDP error while punching: {}", e);
                         }
@@ -88,7 +91,13 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
                     }
                 }
                 _ = probe_interval.tick() => {
-                    let _ = socket.send_to(PROBE_MAGIC, peer).await;
+                    ticks += 1;
+                    if ticks % 10 == 1 {
+                        debug!("punch: tick {} (grace {})", ticks, grace_deadline.is_some());
+                    }
+                    if let Err(e) = socket.send_to(PROBE_MAGIC, peer).await {
+                        debug!("punch: send failed: {}", e);
+                    }
                     let now = tokio::time::Instant::now();
                     if let Some(dl) = grace_deadline {
                         if now >= dl {

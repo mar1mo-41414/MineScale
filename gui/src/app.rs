@@ -215,8 +215,10 @@ impl App {
         let telemetry_enabled = self.telemetry_enabled;
         let paths_cell = Arc::clone(&self.host_paths_cell);
         let ctx_paths = ctx.clone();
+        let ended_w = Arc::clone(&self.ended_cell);
+        let ctx_w   = ctx.clone();
 
-        rt.spawn(async move {
+        let handle = rt.spawn(async move {
             tracing::info!("Starting host…");
             ctx2.request_repaint();
 
@@ -243,6 +245,7 @@ impl App {
             if let Ok(mut c) = ended.lock() { *c = Some((gen, err)); }
             ctx2.request_repaint();
         });
+        Self::watch_session(&rt, handle, ended_w, ctx_w, gen);
     }
 
     fn start_join(&mut self, ctx: egui::Context) {
@@ -261,12 +264,14 @@ impl App {
         let transport_cell = Arc::clone(&self.join_transport_cell);
         let transport_cell_change = Arc::clone(&self.join_transport_cell);
         let ctx_change = ctx.clone();
+        let ended_w = Arc::clone(&self.ended_cell);
+        let ctx_w   = ctx.clone();
         let allow_lan = self.allow_lan;
         let rt   = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
         let telemetry_enabled = self.telemetry_enabled;
 
-        rt.spawn(async move {
+        let handle = rt.spawn(async move {
             tracing::info!("Joining room…");
             ctx2.request_repaint();
 
@@ -295,6 +300,31 @@ impl App {
             };
             if let Ok(mut c) = ended.lock() { *c = Some((gen, err)); }
             ctx2.request_repaint();
+        });
+        Self::watch_session(&rt, handle, ended_w, ctx_w, gen);
+    }
+
+    /// A panic inside the session task only kills that task: nothing is
+    /// returned, nothing is logged, and the window keeps looking alive. Watch
+    /// the task and report how it really ended.
+    fn watch_session(
+        rt: &tokio::runtime::Runtime,
+        handle: tokio::task::JoinHandle<()>,
+        ended: Arc<Mutex<Option<(u64, Option<String>)>>>,
+        ctx: egui::Context,
+        gen: u64,
+    ) {
+        rt.spawn(async move {
+            if let Err(e) = handle.await {
+                let msg = if e.is_panic() {
+                    "internal error: the session crashed (details are in the log file)"
+                } else {
+                    "the session was cancelled unexpectedly"
+                };
+                tracing::error!("{}", msg);
+                if let Ok(mut c) = ended.lock() { *c = Some((gen, Some(msg.to_string()))); }
+                ctx.request_repaint();
+            }
         });
     }
 

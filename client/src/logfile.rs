@@ -103,24 +103,26 @@ impl FileLog {
 /// A `tracing` layer that writes events to a [`FileLog`].
 pub struct FileLayer {
     log: Arc<FileLog>,
-    /// Mirror the GUI pane: only this crate's events, INFO and above.
-    /// `false` = record whatever the subscriber's own filter lets through.
-    app_info_only: bool,
+    /// `Some(level)`: only this crate's events, down to `level` (so `DEBUG`
+    /// also records the detailed trail the GUI pane doesn't show).
+    /// `None`: record whatever the subscriber's own filter lets through.
+    app_up_to: Option<Level>,
 }
 
 impl FileLayer {
-    pub fn new(log: Arc<FileLog>, app_info_only: bool) -> Self {
-        Self { log, app_info_only }
+    pub fn new(log: Arc<FileLog>, app_up_to: Option<Level>) -> Self {
+        Self { log, app_up_to }
     }
 }
 
 impl<S: Subscriber> Layer<S> for FileLayer {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        if self.app_info_only
-            && (!meta.target().starts_with("mc_share") || *meta.level() > Level::INFO)
-        {
-            return;
+        if let Some(max) = self.app_up_to {
+            // (tracing: a *more verbose* level compares as greater)
+            if !meta.target().starts_with("mc_share") || *meta.level() > max {
+                return;
+            }
         }
         let mut v = LineVisitor::default();
         event.record(&mut v);
@@ -150,6 +152,42 @@ impl Visit for LineVisitor {
             self.fields.push_str(&format!(" {}={}", field.name(), value));
         }
     }
+}
+
+/// Log panics (message, thread, source line) instead of losing them.
+///
+/// A panic inside a tokio task only kills that task, and the message goes to
+/// stderr — which a Windows GUI app doesn't have. The session just goes
+/// silent. This writes it to the log (and still runs the previous hook).
+pub fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "?".into());
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "(non-string panic payload)".into());
+        let thread = std::thread::current().name().unwrap_or("?").to_string();
+        tracing::error!(target: "mc_share::panic", "PANIC in thread '{}' at {}: {}", thread, location, message);
+        previous(info);
+    }));
+}
+
+/// Write a DEBUG `alive` line from a plain OS thread every `every`.
+///
+/// If a session goes silent, this tells the two causes apart: heartbeats
+/// continuing = the process is alive and something is stuck; heartbeats
+/// stopping = the process itself died.
+pub fn spawn_heartbeat(every: std::time::Duration) {
+    let _ = std::thread::Builder::new().name("heartbeat".into()).spawn(move || loop {
+        std::thread::sleep(every);
+        tracing::debug!(target: "mc_share::heartbeat", "alive");
+    });
 }
 
 /// `2023-11-14T22:13:20Z` — std only, no date crate.
@@ -197,7 +235,7 @@ mod tests {
     fn events_are_on_disk_as_soon_as_they_happen() {
         let dir = tmpdir("immediate");
         let log = FileLog::open_in(&dir, "t", "9.9.9").unwrap();
-        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), false));
+        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), None));
         tracing::subscriber::with_default(sub, || {
             tracing::info!("first line");
             // Read back *while the subscriber and file are still open*:
@@ -235,10 +273,10 @@ mod tests {
     }
 
     #[test]
-    fn gui_mode_keeps_only_app_info_and_above() {
+    fn app_filter_keeps_only_app_events_up_to_the_level() {
         let dir = tmpdir("filter");
         let log = FileLog::open_in(&dir, "t", "1").unwrap();
-        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), true));
+        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), Some(Level::INFO)));
         tracing::subscriber::with_default(sub, || {
             tracing::debug!(target: "mc_share::x", "too chatty");
             tracing::info!(target: "winit::event", "other crate");
@@ -246,6 +284,36 @@ mod tests {
         });
         let all = std::fs::read_to_string(log.path()).unwrap();
         assert!(all.contains("kept") && !all.contains("too chatty") && !all.contains("other crate"), "{all}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn debug_level_is_recorded_when_asked_for() {
+        let dir = tmpdir("debug");
+        let log = FileLog::open_in(&dir, "t", "1").unwrap();
+        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), Some(Level::DEBUG)));
+        tracing::subscriber::with_default(sub, || {
+            tracing::debug!(target: "mc_share::x", "detail");
+            tracing::trace!(target: "mc_share::x", "too fine");
+        });
+        let all = std::fs::read_to_string(log.path()).unwrap();
+        assert!(all.contains("detail") && !all.contains("too fine"), "{all}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_panic_is_written_to_the_log() {
+        let dir = tmpdir("panic");
+        let log = FileLog::open_in(&dir, "t", "1").unwrap();
+        let sub = tracing_subscriber::registry().with(FileLayer::new(log.clone(), None));
+        let previous = std::panic::take_hook();
+        install_panic_hook();
+        tracing::subscriber::with_default(sub, || {
+            let _ = std::panic::catch_unwind(|| panic!("boom from a test"));
+        });
+        std::panic::set_hook(previous); // don't leave our hook installed for other tests
+        let all = std::fs::read_to_string(log.path()).unwrap();
+        assert!(all.contains("PANIC") && all.contains("boom from a test"), "{all}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

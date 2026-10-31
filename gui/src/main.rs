@@ -36,11 +36,16 @@ fn main() -> eframe::Result<()> {
     let file_log = mc_share::logfile::FileLog::open("mc-share-gui", env!("CARGO_PKG_VERSION"));
     tracing_subscriber::registry()
         .with(GuiLayer(Arc::clone(&log)))
-        .with(file_log.clone().map(|f| mc_share::logfile::FileLayer::new(f, true)))
+        .with(file_log.clone().map(|f| mc_share::logfile::FileLayer::new(f, Some(tracing::Level::DEBUG))))
         .init();
     if let Some(f) = &file_log {
         tracing::info!("Log file: {}", f.path().display());
     }
+    // A panic inside a background task would otherwise vanish (a Windows GUI
+    // has no stderr). Record it, and a periodic "alive" so a silent stop can
+    // be told apart from a dead process.
+    mc_share::logfile::install_panic_hook();
+    mc_share::logfile::spawn_heartbeat(std::time::Duration::from_secs(10));
 
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()
