@@ -29,6 +29,28 @@ const GRACE_AFTER_RECEIVE: Duration = Duration::from_millis(2500);
 // attempt the QUIC connect, opening the host's NAT first.
 const BEST_EFFORT_SEND: Duration = Duration::from_secs(5);
 
+/// A UDP error that says nothing about *our* socket being broken.
+///
+/// When we send to a peer whose NAT answers "port unreachable" (exactly what
+/// happens to the first hole-punch probes, which arrive before the peer's own
+/// outbound packet has opened its NAT), Windows reports it on the **next
+/// `recvfrom` of that socket** as `WSAECONNRESET`. Treating it as fatal ended
+/// the whole host session right after the first joiner appeared. Unix reports
+/// the equivalent as `ConnectionRefused` on connected sockets. Both mean
+/// "that probe went nowhere" — carry on.
+pub fn is_transient_udp_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
 /// UDP hole punching.
 ///
 /// - Normal path: receives a probe back, then sends for GRACE_AFTER_RECEIVE.
@@ -59,6 +81,9 @@ pub async fn punch_holes(socket: &UdpSocket, peer: SocketAddr) -> Result<()> {
                             }
                         }
                         Ok(_) => {}
+                        Err(e) if is_transient_udp_error(&e) => {
+                            debug!("ignoring transient UDP error while punching: {}", e);
+                        }
                         Err(e) => return Err(anyhow!(e)),
                     }
                 }
@@ -632,6 +657,22 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(2500)).await;
         assert!(conn.close_reason().is_none(), "closed: {:?}", conn.close_reason());
         assert!(conn.open_bi().await.is_ok());
+    }
+
+    #[test]
+    fn icmp_style_udp_errors_are_transient() {
+        use std::io::{Error, ErrorKind};
+        // what Windows returns from recvfrom after an ICMP port-unreachable
+        assert!(is_transient_udp_error(&Error::from(ErrorKind::ConnectionReset)));
+        // the raw OS code each platform really uses for "connection reset"
+        let raw = if cfg!(windows) { 10054 }          // WSAECONNRESET
+                  else if cfg!(target_os = "macos") { 54 }  // ECONNRESET (BSD)
+                  else { 104 };                              // ECONNRESET (Linux)
+        assert!(is_transient_udp_error(&Error::from_raw_os_error(raw)));
+        assert!(is_transient_udp_error(&Error::from(ErrorKind::ConnectionRefused)));
+        // genuinely broken sockets still surface
+        assert!(!is_transient_udp_error(&Error::from(ErrorKind::PermissionDenied)));
+        assert!(!is_transient_udp_error(&Error::from(ErrorKind::InvalidInput)));
     }
 
     #[test]

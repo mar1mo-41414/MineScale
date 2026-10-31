@@ -184,6 +184,14 @@ CA チェーンを使わず、**フィンガープリントピニング**を採�
 minescale-1
 ```
 
+### ホールパンチの失敗・一時的な UDP エラー
+
+- `ConnectionReset` / `ConnectionRefused` などの一時的な UDP エラーは、ホールパンチと STUN のループで
+  無視して続行する（Windows は、相手の NAT が返した ICMP エラーを、次の `recvfrom` に
+  `WSAECONNRESET` として返す）。
+- ホールパンチが失敗しても、セッションは終了しない。ホストは QUIC サーバーと Relay の待機を続け、
+  ジョインは QUIC を試してから Relay に進む。
+
 ### QUIC の keep-alive とタイムアウト
 
 ```

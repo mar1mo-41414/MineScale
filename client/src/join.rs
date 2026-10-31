@@ -127,7 +127,10 @@ async fn run_inner(
     match host_addr {
         Some(addr) => {
             println!("  … Establishing P2P connection…");
-            tunnel::punch_holes(&udp_socket, addr).await?;
+            // A failed punch isn't fatal: try QUIC anyway, then fall back to the relay.
+            if let Err(e) = tunnel::punch_holes(&udp_socket, addr).await {
+                warn!("Hole punching failed ({}) — trying anyway, then the relay", e);
+            }
         }
         None => println!("  … No direct path available — connecting through the relay…"),
     }

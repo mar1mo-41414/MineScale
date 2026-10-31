@@ -122,6 +122,15 @@ pub struct App {
     // ── cancellation ─────────────────────────────────────────────────────────
     cancel: Option<CancellationToken>,
 
+    // ── how a session ended ──────────────────────────────────────────────────
+    /// Bumped on every start, so a late "ended" from an older session can't
+    /// reset a newer one.
+    session_gen: u64,
+    /// `(generation, error)` written by a session's task when it finishes.
+    ended_cell: Arc<Mutex<Option<(u64, Option<String>)>>>,
+    /// Why the last session stopped on its own (shown in red), if it failed.
+    last_error: Option<String>,
+
     // ── opt-in telemetry flag (set via CLI flag or env var at startup) ──────
     telemetry_enabled: bool,
 }
@@ -159,6 +168,9 @@ impl App {
             diag_running: false,
             log,
             cancel: None,
+            session_gen: 0,
+            ended_cell: Arc::new(Mutex::new(None)),
+            last_error: None,
             telemetry_enabled,
         }
     }
@@ -176,6 +188,8 @@ impl App {
         self.local_port      = 0;
         self.join_transport  = None;
         self.room_expires_at = None;
+        self.last_error      = None;
+        if let Ok(mut c) = self.ended_cell.lock() { *c = None; }
         if let Ok(mut c) = self.share_url_cell.lock()  { *c = None; }
         if let Ok(mut c) = self.local_port_cell.lock() { *c = None; }
         if let Ok(mut c) = self.join_transport_cell.lock() { *c = None; }
@@ -191,6 +205,9 @@ impl App {
         let cancel       = CancellationToken::new();
         self.cancel      = Some(cancel.clone());
         self.state       = RunState::Running;
+        self.session_gen += 1;
+        let gen   = self.session_gen;
+        let ended = Arc::clone(&self.ended_cell);
 
         let share_cell = Arc::clone(&self.share_url_cell);
         let rt  = Arc::clone(&self.rt);
@@ -219,10 +236,11 @@ impl App {
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
-            match host_run(config).await {
-                Ok(_)  => tracing::info!("Host session ended."),
-                Err(e) => tracing::error!("{}", e),
-            }
+            let err = match host_run(config).await {
+                Ok(_)  => { tracing::info!("Host session ended."); None }
+                Err(e) => { tracing::error!("{:#}", e); Some(format!("{:#}", e)) }
+            };
+            if let Ok(mut c) = ended.lock() { *c = Some((gen, err)); }
             ctx2.request_repaint();
         });
     }
@@ -235,6 +253,9 @@ impl App {
         let cancel     = CancellationToken::new();
         self.cancel    = Some(cancel.clone());
         self.state     = RunState::Running;
+        self.session_gen += 1;
+        let gen   = self.session_gen;
+        let ended = Arc::clone(&self.ended_cell);
 
         let port_cell = Arc::clone(&self.local_port_cell);
         let transport_cell = Arc::clone(&self.join_transport_cell);
@@ -268,10 +289,11 @@ impl App {
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
 
-            match join_run(config).await {
-                Ok(_)  => tracing::info!("Disconnected."),
-                Err(e) => tracing::error!("{}", e),
-            }
+            let err = match join_run(config).await {
+                Ok(_)  => { tracing::info!("Disconnected."); None }
+                Err(e) => { tracing::error!("{:#}", e); Some(format!("{:#}", e)) }
+            };
+            if let Ok(mut c) = ended.lock() { *c = Some((gen, err)); }
             ctx2.request_repaint();
         });
     }
@@ -285,6 +307,16 @@ impl App {
     // ── Poll callback cells ───────────────────────────────────────────────────
 
     fn poll_cells(&mut self) {
+        // A session that stopped on its own (error, or the peer went away):
+        // go back to Idle and say why, instead of looking alive.
+        let ended = self.ended_cell.lock().ok().and_then(|mut c| c.take());
+        if let Some((gen, err)) = ended {
+            if gen == self.session_gen && self.state == RunState::Running {
+                self.state = RunState::Idle;
+                self.cancel = None;
+                self.last_error = err;
+            }
+        }
         if self.share_url.is_empty() {
             if let Ok(c) = self.share_url_cell.lock() {
                 if let Some(u) = c.as_ref() {
@@ -308,6 +340,16 @@ impl App {
     }
 
     // ── UI panels ─────────────────────────────────────────────────────────────
+
+    /// Red note under the buttons when a session ended with an error.
+    fn show_last_error(&self, ui: &mut Ui) {
+        if let Some(e) = &self.last_error {
+            ui.add_space(6.0);
+            ui.colored_label(Color32::from_rgb(230, 90, 90), format!("⚠  Session ended: {e}"));
+            ui.label(RichText::new("  See the log below, or the log file, for details.")
+                .color(Color32::GRAY).size(12.0));
+        }
+    }
 
     fn show_host_panel(&mut self, ui: &mut Ui, ctx: &egui::Context) {
         let idle = self.state == RunState::Idle;
@@ -341,7 +383,9 @@ impl App {
             }
         }
 
-        if !self.share_url.is_empty() {
+        self.show_last_error(ui);
+
+        if !self.share_url.is_empty() && self.state == RunState::Running {
             ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
@@ -471,6 +515,7 @@ impl App {
                 if ui.button("  Disconnect  ").clicked() { self.stop(); }
             }
         }
+        self.show_last_error(ui);
     }
 
     // ── Diagnostics ───────────────────────────────────────────────────────────

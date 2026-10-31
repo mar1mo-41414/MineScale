@@ -41,6 +41,7 @@ pub async fn get_external_addr(stun_server: &str) -> Result<(UdpSocket, SocketAd
                     return Ok((socket, addr));
                 }
             }
+            Ok(Err(e)) if crate::tunnel::is_transient_udp_error(&e) => continue,
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
                 if attempt < 2 {
@@ -80,6 +81,7 @@ pub async fn query_stun(socket: &UdpSocket, stun_server: &str) -> Result<SocketA
                     return Ok(addr);
                 }
             }
+            Ok(Err(e)) if crate::tunnel::is_transient_udp_error(&e) => continue,
             Ok(Err(e)) => return Err(e.into()),
             Err(_) => {
                 if attempt < 2 { continue; }

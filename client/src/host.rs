@@ -139,7 +139,13 @@ async fn run_inner(
             _ => None,
         };
     match first_addr {
-        Some(addr) => tunnel::punch_holes(&udp_socket, addr).await?,
+        Some(addr) => {
+            // Never let a failed punch end the session: the QUIC server and the
+            // relay pool start below regardless, and either may still serve the joiner.
+            if let Err(e) = tunnel::punch_holes(&udp_socket, addr).await {
+                warn!("Hole punching failed ({}) — continuing; the relay is still available", e);
+            }
+        }
         None => info!("No direct path to this joiner — skipping hole punching (relay only)"),
     }
 
