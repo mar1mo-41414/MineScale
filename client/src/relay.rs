@@ -58,15 +58,71 @@ fn tune(stream: &TcpStream) {
     let _ = SockRef::from(stream).set_tcp_keepalive(&ka);
 }
 
+/// Delay between starting connection attempts to successive addresses
+/// (Happy Eyeballs, RFC 8305: 250 ms recommended).
+const ATTEMPT_STAGGER: Duration = Duration::from_millis(250);
+
+/// Order resolved addresses for dialing: IPv4 first, then IPv6 (each group
+/// keeps its resolver order). The relay is reachable over IPv4; a dual-stack
+/// hostname can carry an IPv6 address that is blackholed for this port.
+fn order_addresses(mut addrs: Vec<std::net::SocketAddr>) -> Vec<std::net::SocketAddr> {
+    addrs.sort_by_key(|a| a.is_ipv6()); // stable: false (v4) sorts first
+    addrs
+}
+
+/// Connect to `host:port`, trying **every** resolved address.
+///
+/// `TcpStream::connect(&str)` tries addresses one at a time, each waiting out
+/// the OS connect timeout. When a hostname has an unreachable IPv6 address
+/// (we hit exactly this: an AAAA record whose port 9090 never answers), the
+/// first attempt hangs, our overall timeout expires, and the IPv4 address is
+/// never tried — the relay looks down on any dual-stack network.
+///
+/// Here the attempts are started in a staggered way (IPv4 first) and the
+/// first one to succeed wins, so a dead address costs at most the stagger.
+async fn connect_tcp(target: &str, total: Duration) -> Result<TcpStream> {
+    let attempt = async {
+        let addrs = order_addresses(tokio::net::lookup_host(target).await?.collect());
+        if addrs.is_empty() {
+            return Err(anyhow!("no addresses for {}", target));
+        }
+        let mut set = tokio::task::JoinSet::new();
+        for (i, addr) in addrs.iter().copied().enumerate() {
+            set.spawn(async move {
+                tokio::time::sleep(ATTEMPT_STAGGER * i as u32).await;
+                TcpStream::connect(addr).await.map_err(|e| format!("{addr}: {e}"))
+            });
+        }
+        let mut errors: Vec<String> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            match joined {
+                Ok(Ok(stream)) => {
+                    set.abort_all();
+                    return Ok(stream);
+                }
+                Ok(Err(e)) => errors.push(e),
+                Err(_) => {} // aborted / panicked task
+            }
+        }
+        Err(anyhow!("could not connect to {} ({})", target, errors.join("; ")))
+    };
+    match tokio::time::timeout(total, attempt).await {
+        Ok(r) => r,
+        Err(_) => Err(anyhow!(
+            "relay connect timeout after {}s (addr={})",
+            total.as_secs(),
+            target
+        )),
+    }
+}
+
 async fn dial_and_auth(
     relay_addr: &str,
     room_id: &str,
     role: &str,
     token: &str,
 ) -> Result<TcpStream> {
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(relay_addr))
-        .await
-        .map_err(|_| anyhow!("relay connect timeout (addr={})", relay_addr))??;
+    let stream = connect_tcp(relay_addr, CONNECT_TIMEOUT).await?;
     tune(&stream);
 
     let line = format!("RELAY {} {} {}\n", room_id, role, token);
@@ -266,4 +322,43 @@ pub async fn join_forward(
         elapsed_ms, which, bytes
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn ipv4_is_dialed_before_ipv6() {
+        let v6: SocketAddr = "[2001:db8::1]:9090".parse().unwrap();
+        let v4a: SocketAddr = "192.0.2.1:9090".parse().unwrap();
+        let v4b: SocketAddr = "192.0.2.2:9090".parse().unwrap();
+        // resolver returned IPv6 first (as it did for the real relay host)
+        assert_eq!(order_addresses(vec![v6, v4a, v4b]), vec![v4a, v4b, v6]);
+    }
+
+    /// `localhost` resolves to both ::1 and 127.0.0.1; the listener is IPv4
+    /// only, so the IPv6 attempt is refused and IPv4 must still win.
+    #[tokio::test]
+    async fn connects_when_the_other_family_fails() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        let target = format!("localhost:{port}");
+        let accept = tokio::spawn(async move { l.accept().await.is_ok() });
+        let s = connect_tcp(&target, Duration::from_secs(5)).await;
+        assert!(s.is_ok(), "{:?}", s.err());
+        assert!(accept.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reports_failure_when_nothing_listens() {
+        // grab a free port, then close it so nothing is listening
+        let port = {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let r = connect_tcp(&format!("127.0.0.1:{port}"), Duration::from_secs(5)).await;
+        assert!(r.is_err());
+    }
 }
