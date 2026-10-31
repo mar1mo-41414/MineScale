@@ -93,6 +93,8 @@ pub struct App {
     coord_url:   String,
     mc_port:     String,
     share_input: String,
+    /// Join: let other devices on the network use the local proxy (default off).
+    allow_lan:   bool,
 
     // ── outputs (set by background callbacks) ────────────────────────────────
     share_url_cell:  Arc<Mutex<Option<String>>>,
@@ -144,6 +146,7 @@ impl App {
             coord_url:   DEFAULT_COORD.into(),
             mc_port:     String::new(),
             share_input: String::new(),
+            allow_lan:   false,
             share_url_cell:  Arc::new(Mutex::new(None)),
             local_port_cell: Arc::new(Mutex::new(None)),
             join_transport_cell: Arc::new(Mutex::new(None)),
@@ -235,6 +238,7 @@ impl App {
 
         let port_cell = Arc::clone(&self.local_port_cell);
         let transport_cell = Arc::clone(&self.join_transport_cell);
+        let allow_lan = self.allow_lan;
         let rt   = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
         let telemetry_enabled = self.telemetry_enabled;
@@ -253,6 +257,7 @@ impl App {
                     if let Ok(mut c) = port_cell.lock() { *c = Some(port); }
                 })),
                 cancel,
+                allow_lan,
                 telemetry: telemetry_enabled,
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
@@ -417,6 +422,14 @@ impl App {
                         .hint_text("25565"));
                 ui.end_row();
             });
+
+        ui.add_enabled(idle, egui::Checkbox::new(
+            &mut self.allow_lan,
+            "Allow other devices on my network to connect",
+        ));
+        ui.label(RichText::new(
+            "  Off (recommended): only this computer can see and use the world.",
+        ).color(Color32::GRAY).size(12.0));
 
         ui.add_space(8.0);
         match self.state {

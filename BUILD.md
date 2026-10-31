@@ -87,7 +87,11 @@ export LISTEN_RELAY="0.0.0.0:9090"
 ./mc-share-server
 ```
 
-nginx / Pangolin / Traefik などのリバースプロキシ経由で 443 に出します。
+nginx / Traefik などのリバースプロキシ経由で 443 に出します。
+
+> `RELAY_ADDR` には、**クライアントから到達できる公開ホスト名（またはグローバル IP）** と
+> ポートを指定してください（例: `mcs.example.com:9090`）。LAN 内のプライベート IP を書くと、
+> 外部のジョイナーが Relay に届きません。ホスト名は接続のたびに DNS 解決されます。
 
 ### nginx 例
 
@@ -116,4 +120,10 @@ mc-share host --port 25565
 # 参加
 mc-share join https://mcs.example.com/8fk2lm
 mc-share join 8fk2lm                            # ショート URL
+
+# 同じネットワークの他端末にも、ワールドの表示・接続を許す（既定は自分のパソコンだけ）
+mc-share join <URL> --allow-lan
+
+# 接続調査への協力（任意・既定オフ。詳細は README 末尾）
+mc-share host --telemetry
 ```

@@ -59,6 +59,11 @@ pub struct JoinArgs {
     #[arg(long, default_value = "stun.l.google.com:19302")]
     pub stun_server: String,
 
+    /// Let other devices on your network see and use the local proxy.
+    /// Off by default: only this computer can reach the world.
+    #[arg(long, default_value_t = false)]
+    pub allow_lan: bool,
+
     /// Send anonymous connection diagnostics to the coordination server.
     /// Off by default. See README ("接続調査への協力について") for what is collected.
     // The MC_SHARE_TELEMETRY env var is read by telemetry::enabled() (which

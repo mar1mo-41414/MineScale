@@ -298,7 +298,6 @@ impl rustls::client::danger::ServerCertVerifier for PinnedCertVerifier {
 /// rather than optimistically after `punch_holes` returns.
 pub async fn run_host(
     socket: UdpSocket,
-    _peer_addr: SocketAddr,
     cert_key: rcgen::CertifiedKey,
     mc_addr: SocketAddr,
     mut new_joiners_rx: tokio::sync::mpsc::UnboundedReceiver<SocketAddr>,
@@ -396,39 +395,52 @@ pub struct RelayFallback {
 /// transport.
 pub async fn run_join(
     socket: UdpSocket,
-    host_addr: SocketAddr,
+    host_addr: Option<SocketAddr>,
     cert_fingerprint: Vec<u8>,
     local_addr: SocketAddr,
     relay_fallback: Option<RelayFallback>,
+    allow_lan: bool,
     on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>>,
 ) -> Result<()> {
     const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
-    let std_socket = socket.into_std()?;
-    let endpoint = build_client_endpoint(std_socket, cert_fingerprint)?;
+    // No direct address (STUN failed on either side, e.g. UDP blocked) means
+    // there is nothing to hole-punch to: go straight to the relay.
+    let endpoint = match host_addr {
+        Some(_) => Some(build_client_endpoint(socket.into_std()?, cert_fingerprint)?),
+        None => {
+            info!("No direct address available — skipping QUIC, using the relay");
+            None
+        }
+    };
 
-    info!("Connecting to host via QUIC at {} (timeout {}s)…", host_addr, QUIC_CONNECT_TIMEOUT.as_secs());
-    let quic_conn = match endpoint.connect(host_addr, "minescale") {
-        Ok(connecting) => {
-            match tokio::time::timeout(QUIC_CONNECT_TIMEOUT, connecting).await {
-                Ok(Ok(c)) => {
-                    info!("P2P tunnel established (QUIC)");
-                    Some(c)
+    let quic_conn = match (&endpoint, host_addr) {
+        (Some(endpoint), Some(host_addr)) => {
+            info!("Connecting to host via QUIC at {} (timeout {}s)…", host_addr, QUIC_CONNECT_TIMEOUT.as_secs());
+            match endpoint.connect(host_addr, "minescale") {
+                Ok(connecting) => {
+                    match tokio::time::timeout(QUIC_CONNECT_TIMEOUT, connecting).await {
+                        Ok(Ok(c)) => {
+                            info!("P2P tunnel established (QUIC)");
+                            Some(c)
+                        }
+                        Ok(Err(e)) => {
+                            warn!("QUIC handshake failed: {}", e);
+                            None
+                        }
+                        Err(_) => {
+                            warn!("QUIC handshake timed out after {}s", QUIC_CONNECT_TIMEOUT.as_secs());
+                            None
+                        }
+                    }
                 }
-                Ok(Err(e)) => {
-                    warn!("QUIC handshake failed: {}", e);
-                    None
-                }
-                Err(_) => {
-                    warn!("QUIC handshake timed out after {}s", QUIC_CONNECT_TIMEOUT.as_secs());
+                Err(e) => {
+                    warn!("QUIC connect setup failed: {}", e);
                     None
                 }
             }
         }
-        Err(e) => {
-            warn!("QUIC connect setup failed: {}", e);
-            None
-        }
+        _ => None,
     };
 
     let mode = match (&quic_conn, &relay_fallback) {
@@ -438,10 +450,11 @@ pub async fn run_join(
             Transport::Relay
         }
         (None, None) => {
-            return Err(anyhow!("QUIC failed and no relay fallback available"));
+            return Err(anyhow!("No direct connection and no relay available"));
         }
     };
 
+    let _endpoint_alive = &endpoint; // keep the QUIC endpoint alive for the session
     let listener = tokio::net::TcpListener::bind(local_addr).await?;
     let bound_port = listener.local_addr()?.port();
     info!("Minecraft proxy ready on 0.0.0.0:{} (transport={})", bound_port, mode.as_str());
@@ -453,6 +466,18 @@ pub async fn run_join(
     loop {
         match listener.accept().await {
             Ok((tcp_stream, peer)) => {
+                // The proxy listens on 0.0.0.0 (Minecraft connects to the LAN
+                // address it read from the announce), so check who is asking:
+                // by default only this computer may use the tunnel.
+                if !allow_lan && !crate::lan::is_this_machine(peer.ip()) {
+                    warn!(
+                        "Rejected a connection from {} — only this computer may use the \
+                         local proxy (use --allow-lan / the GUI option to change this)",
+                        peer.ip()
+                    );
+                    drop(tcp_stream);
+                    continue;
+                }
                 info!("Minecraft client connected from {} (transport={})", peer, mode.as_str());
                 match &quic_conn {
                     Some(conn) => {

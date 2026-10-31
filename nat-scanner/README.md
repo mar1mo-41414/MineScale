@@ -95,30 +95,30 @@ Full options:
 --quiet                   Suppress the human summary.
 ```
 
-## Sample output (this machine, currently on a NAT-heavy network)
+## Sample output (a network with a symmetric-NAT-like gateway)
 
 ```
 NAT Behaviour Scanner — 2026-06-08T01:09:54+00:00
-Host: MarkBookM4
+Host: example-host
 
-External IPv4 seen: 183.76.205.128
+External IPv4 seen: 203.0.113.10
 
 TEST A — peer dependence  (one socket → many STUN servers)
 ----------------------------------------------------------------------
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:55956  (rtt 28ms)
-  ✓ stun1.l.google.com:19302              ext=183.76.205.128:55956  (rtt 23ms)
-  ✓ stun.cloudflare.com:3478              ext=183.76.205.128:31767  (rtt 30ms)
-  ✓ stun.nextcloud.com:443                ext=183.76.205.128:14251  (rtt 276ms)
-  ✓ stun.miwifi.com:3478                  ext=183.76.205.128:31769  (rtt 111ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:55956  (rtt 28ms)
+  ✓ stun1.l.google.com:19302              ext=203.0.113.10:55956  (rtt 23ms)
+  ✓ stun.cloudflare.com:3478              ext=203.0.113.10:31767  (rtt 30ms)
+  ✓ stun.nextcloud.com:443                ext=203.0.113.10:14251  (rtt 276ms)
+  ✓ stun.miwifi.com:3478                  ext=203.0.113.10:31769  (rtt 111ms)
   → 5 ok, 4 unique external port(s), 1 unique external IP(s)
 
 TEST B — temporal stability  (same server, repeated)
 ----------------------------------------------------------------------
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:43823  (rtt 23ms)
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:43823  (rtt 94ms)
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:43823  (rtt 20ms)
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:43823  (rtt 16ms)
-  ✓ stun.l.google.com:19302               ext=183.76.205.128:43823  (rtt 96ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:43823  (rtt 23ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:43823  (rtt 94ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:43823  (rtt 20ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:43823  (rtt 16ms)
+  ✓ stun.l.google.com:19302               ext=203.0.113.10:43823  (rtt 96ms)
   → 5 ok, 1 unique external port(s)
 
 Scores (0 = worst for P2P, 100 = best)

@@ -2,7 +2,7 @@ use crate::{cli::HostArgs, coord, crypto, diag, lan, relay, stun, telemetry, tra
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
 // ── Public config (used by GUI as well as CLI) ────────────────────────────────
 
@@ -94,15 +94,27 @@ async fn run_inner(
 
     // ── 3. STUN ───────────────────────────────────────────────────────────────
     println!("  … Discovering external address via STUN…");
-    let (udp_socket, external_addr) = stun::get_external_addr(&config.stun_server).await?;
-    info!("External address: {}", external_addr);
+    // Without STUN (UDP blocked / unreachable) there is no direct path, but
+    // friends can still reach us through the relay — so carry on.
+    let (udp_socket, external_addr) = match stun::get_external_addr(&config.stun_server).await {
+        Ok((sock, addr)) => {
+            info!("External address: {}", addr);
+            (sock, Some(addr))
+        }
+        Err(e) => {
+            warn!("STUN failed ({}) — direct P2P is unavailable, using the relay only", e);
+            println!("  … Direct connection unavailable (UDP may be blocked) — using the relay.");
+            (tokio::net::UdpSocket::bind("0.0.0.0:0").await?, None)
+        }
+    };
 
     // ── 4. Register room ──────────────────────────────────────────────────────
     println!("  … Registering room on coordination server…");
     let coord = coord::Client::new(config.coord_url.clone());
     let room = coord.create_room(coord::CreateRoomRequest {
         host_pubkey: pubkey_b64,
-        host_stun: external_addr.to_string(),
+        // Empty = "no direct address": joiners go straight to the relay.
+        host_stun: external_addr.map(|a| a.to_string()).unwrap_or_default(),
         cert_fingerprint: fp_b64,
     }).await?;
 
@@ -121,8 +133,15 @@ async fn run_inner(
     info!("First joiner at {}", first_peer.join_stun);
 
     // ── 6. Hole punch with first joiner ───────────────────────────────────────
-    let first_addr: std::net::SocketAddr = first_peer.join_stun.parse()?;
-    tunnel::punch_holes(&udp_socket, first_addr).await?;
+    let first_addr: Option<std::net::SocketAddr> =
+        match (external_addr, first_peer.join_stun.parse::<std::net::SocketAddr>()) {
+            (Some(_), Ok(a)) => Some(a),
+            _ => None,
+        };
+    match first_addr {
+        Some(addr) => tunnel::punch_holes(&udp_socket, addr).await?,
+        None => info!("No direct path to this joiner — skipping hole punching (relay only)"),
+    }
 
     // ── 7. Start QUIC server + relay park pool ────────────────────────────────
     let mc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", mc_port).parse()?;
@@ -249,7 +268,7 @@ async fn run_inner(
     ));
 
     let result = tokio::select! {
-        r = tunnel::run_host(udp_socket, first_addr, cert_key, mc_addr, joiner_rx, Some(on_quic_connect)) => r,
+        r = tunnel::run_host(udp_socket, cert_key, mc_addr, joiner_rx, Some(on_quic_connect)) => r,
         _ = cancel.cancelled() => Ok(()),
     };
 

@@ -1,7 +1,7 @@
 use crate::{cli::JoinArgs, coord, crypto, diag, lan, relay, stun, telemetry, transport::Transport, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use tracing::info;
+use tracing::{info, warn};
 
 // ── Public config ─────────────────────────────────────────────────────────────
 
@@ -14,6 +14,9 @@ pub struct JoinConfig {
     /// path actually chosen (direct QUIC or relay).
     pub on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>>,
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Let other devices on the network see/use the local proxy. Default
+    /// off: only this computer can reach the tunnel.
+    pub allow_lan: bool,
     /// Opt-in connection diagnostics. Off by default.
     pub telemetry: bool,
     pub app_kind: telemetry::AppKind,
@@ -28,6 +31,7 @@ impl From<JoinArgs> for JoinConfig {
             stun_server: a.stun_server,
             on_connected: None,
             cancel: tokio_util::sync::CancellationToken::new(),
+            allow_lan: a.allow_lan,
             telemetry: telemetry::enabled(a.telemetry),
             app_kind: telemetry::AppKind::Cli,
         }
@@ -81,22 +85,48 @@ async fn run_inner(
 
     // ── 2. STUN ───────────────────────────────────────────────────────────────
     println!("  … Discovering external address…");
-    let (udp_socket, external_addr) = stun::get_external_addr(&config.stun_server).await?;
-    info!("External address: {}", external_addr);
+    // STUN needs outbound UDP. If it fails (UDP blocked, STUN unreachable) a
+    // direct P2P path is impossible, but the relay (TCP) can still work —
+    // so carry on without an external address instead of giving up.
+    let (udp_socket, external_addr) = match stun::get_external_addr(&config.stun_server).await {
+        Ok((sock, addr)) => {
+            info!("External address: {}", addr);
+            (sock, Some(addr))
+        }
+        Err(e) => {
+            warn!("STUN failed ({}) — direct P2P is unavailable, using the relay only", e);
+            println!("  … Direct connection unavailable (UDP may be blocked) — using the relay.");
+            (tokio::net::UdpSocket::bind("0.0.0.0:0").await?, None)
+        }
+    };
 
     // ── 3. Join the room ──────────────────────────────────────────────────────
     println!("  … Contacting coordination server…");
     let coord = coord::Client::new(config.coord_url.clone());
     let room = coord.join_room(
         &room_id,
-        coord::JoinRoomRequest { join_pubkey: pubkey_b64, join_stun: external_addr.to_string() },
+        coord::JoinRoomRequest {
+            join_pubkey: pubkey_b64,
+            // Empty = "no direct address": the host skips hole punching for us.
+            join_stun: external_addr.map(|a| a.to_string()).unwrap_or_default(),
+        },
     ).await?;
     report.send_event(telemetry::Phase::Registered).await;
 
     // ── 4. Hole punch ─────────────────────────────────────────────────────────
-    println!("  … Establishing P2P connection…");
-    let host_addr: std::net::SocketAddr = room.host_stun.parse()?;
-    tunnel::punch_holes(&udp_socket, host_addr).await?;
+    // A direct path needs an address on BOTH sides.
+    let host_addr: Option<std::net::SocketAddr> =
+        match (external_addr, room.host_stun.parse::<std::net::SocketAddr>()) {
+            (Some(_), Ok(a)) => Some(a),
+            _ => None,
+        };
+    match host_addr {
+        Some(addr) => {
+            println!("  … Establishing P2P connection…");
+            tunnel::punch_holes(&udp_socket, addr).await?;
+        }
+        None => println!("  … No direct path available — connecting through the relay…"),
+    }
 
     // ── 5. Bind local proxy ───────────────────────────────────────────────────
     let local_port = resolve_local_port(config.local_port).await?;
@@ -115,6 +145,7 @@ async fn run_inner(
     // Minecraft's first status ping would get TCP "Connection refused"
     // and silently mark the entry as offline for the rest of the session.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
+    let allow_lan = config.allow_lan;
     let user_on_connected = config.on_connected.take();
     let report_for_cb = report.clone();
     let on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>> =
@@ -123,7 +154,7 @@ async fn run_inner(
             // known, and the listener is really up.
             print_connected(port, transport);
             report_for_cb.set_transport(transport.as_str());
-            tokio::spawn(lan::announce_lan_world("MineScale World", port));
+            tokio::spawn(lan::announce_lan_world("MineScale World", port, allow_lan));
             if let Some(cb) = user_on_connected { cb(port, transport); }
             tokio::spawn(async move {
                 report_for_cb.send_event(telemetry::Phase::Connected).await;
@@ -146,7 +177,7 @@ async fn run_inner(
     tokio::select! {
         r = tunnel::run_join(
             udp_socket, host_addr, cert_fingerprint, local_addr,
-            relay_fallback, on_connected,
+            relay_fallback, allow_lan, on_connected,
         ) => r?,
         _ = cancel.cancelled() => {}
     }
