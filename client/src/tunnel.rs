@@ -107,11 +107,40 @@ async fn poke_joiner_from_quic(endpoint: quinn::Endpoint, joiner_addr: SocketAdd
     debug!("QUIC poke done for {}", joiner_addr);
 }
 
+// ── QUIC transport settings ───────────────────────────────────────────────────
+
+/// Ping the peer this often when otherwise idle.
+///
+/// Without it quinn never sends anything on an idle connection, so (a) the
+/// idle timeout below closes it — a player sitting on the "connect" screen
+/// for 30 s came back to `Join stream error: timed out` — and (b) the NAT's
+/// UDP mapping, which is typically forgotten after 30-60 s of silence, closes
+/// and the peer becomes unreachable.
+const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(10);
+
+/// Close the connection if the peer has been silent this long. With the
+/// keep-alive above this only triggers when the peer is really gone.
+const QUIC_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn transport_config(idle: Duration, keep_alive: Option<Duration>) -> Arc<quinn::TransportConfig> {
+    let mut t = quinn::TransportConfig::default();
+    t.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(idle).expect("idle timeout fits in a QUIC varint"),
+    ));
+    t.keep_alive_interval(keep_alive);
+    Arc::new(t)
+}
+
+fn default_transport() -> Arc<quinn::TransportConfig> {
+    transport_config(QUIC_IDLE_TIMEOUT, Some(QUIC_KEEP_ALIVE))
+}
+
 // ── QUIC endpoint builders ────────────────────────────────────────────────────
 
 fn build_server_endpoint(
     std_socket: std::net::UdpSocket,
     cert_key: &rcgen::CertifiedKey,
+    transport: Arc<quinn::TransportConfig>,
 ) -> Result<quinn::Endpoint> {
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
@@ -128,7 +157,8 @@ fn build_server_endpoint(
     let quic_server = QuicServerConfig::try_from(server_tls)
         .map_err(|e| anyhow!("QuicServerConfig: {}", e))?;
 
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+    let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_server));
+    server_config.transport_config(transport);
 
     let mut endpoint = quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -200,6 +230,7 @@ impl rustls::client::danger::ServerCertVerifier for AcceptAnyCert {
 fn build_client_endpoint(
     std_socket: std::net::UdpSocket,
     expected_fingerprint: Vec<u8>,
+    transport: Arc<quinn::TransportConfig>,
 ) -> Result<quinn::Endpoint> {
     use quinn::crypto::rustls::QuicClientConfig;
 
@@ -219,7 +250,9 @@ fn build_client_endpoint(
         std_socket,
         Arc::new(quinn::TokioRuntime),
     )?;
-    endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(quic_client)));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quic_client));
+    client_config.transport_config(transport);
+    endpoint.set_default_client_config(client_config);
 
     Ok(endpoint)
 }
@@ -304,7 +337,7 @@ pub async fn run_host(
     on_first_connect: Option<Box<dyn Fn() + Send + Sync>>,
 ) -> Result<()> {
     let std_socket = socket.into_std()?;
-    let endpoint = build_server_endpoint(std_socket, &cert_key)?;
+    let endpoint = build_server_endpoint(std_socket, &cert_key, default_transport())?;
     info!("QUIC server ready — accepting connections");
 
     let on_first_connect = on_first_connect.map(Arc::new);
@@ -401,13 +434,14 @@ pub async fn run_join(
     relay_fallback: Option<RelayFallback>,
     allow_lan: bool,
     on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>>,
+    on_path_change: Option<Arc<dyn Fn(Transport) + Send + Sync>>,
 ) -> Result<()> {
     const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
     // No direct address (STUN failed on either side, e.g. UDP blocked) means
     // there is nothing to hole-punch to: go straight to the relay.
     let endpoint = match host_addr {
-        Some(_) => Some(build_client_endpoint(socket.into_std()?, cert_fingerprint)?),
+        Some(_) => Some(build_client_endpoint(socket.into_std()?, cert_fingerprint, default_transport())?),
         None => {
             info!("No direct address available — skipping QUIC, using the relay");
             None
@@ -455,6 +489,24 @@ pub async fn run_join(
     };
 
     let _endpoint_alive = &endpoint; // keep the QUIC endpoint alive for the session
+
+    // If the direct connection dies mid-session, say so right away (and tell
+    // the UI), instead of leaving every later Minecraft connection to fail
+    // with an unexplained "timed out".
+    if let Some(conn) = &quic_conn {
+        let conn = conn.clone();
+        let notify = on_path_change.clone();
+        let relay_available = relay_fallback.is_some();
+        tokio::spawn(async move {
+            let reason = conn.closed().await;
+            if relay_available {
+                warn!("Direct connection lost ({}) — new connections will use the relay", reason);
+                if let Some(cb) = notify { cb(Transport::Relay); }
+            } else {
+                warn!("Direct connection lost ({}) and no relay is available — reconnect to continue", reason);
+            }
+        });
+    }
     let listener = tokio::net::TcpListener::bind(local_addr).await?;
     let bound_port = listener.local_addr()?.port();
     info!("Minecraft proxy ready on 0.0.0.0:{} (transport={})", bound_port, mode.as_str());
@@ -478,9 +530,13 @@ pub async fn run_join(
                     drop(tcp_stream);
                     continue;
                 }
-                info!("Minecraft client connected from {} (transport={})", peer, mode.as_str());
-                match &quic_conn {
-                    Some(conn) => {
+                // Use the direct tunnel only while it is alive; if it has died,
+                // new connections go through the relay (when there is one).
+                let live_quic = quic_conn.as_ref().filter(|c| c.close_reason().is_none());
+                let now = if live_quic.is_some() { Transport::Quic } else { Transport::Relay };
+                info!("Minecraft client connected from {} (transport={})", peer, now.as_str());
+                match (live_quic, &relay_fallback) {
+                    (Some(conn), _) => {
                         let conn = conn.clone();
                         tokio::spawn(async move {
                             if let Err(e) = forward_from_minecraft(tcp_stream, conn).await {
@@ -488,8 +544,8 @@ pub async fn run_join(
                             }
                         });
                     }
-                    None => {
-                        let r = relay_fallback.clone().unwrap();
+                    (None, Some(r)) => {
+                        let r = r.clone();
                         tokio::spawn(async move {
                             if let Err(e) = crate::relay::join_forward(
                                 tcp_stream, &r.addr, &r.room_id, &r.token,
@@ -497,6 +553,10 @@ pub async fn run_join(
                                 warn!("Relay forward error: {}", e);
                             }
                         });
+                    }
+                    (None, None) => {
+                        warn!("The direct connection is down and there is no relay — dropping this connection");
+                        drop(tcp_stream);
                     }
                 }
             }
@@ -518,4 +578,64 @@ async fn forward_from_minecraft(
         r = b => { r?; }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Connect a client to a server over loopback using the given transport
+    /// settings, and keep the endpoints alive for the duration of the test.
+    async fn connected_pair(
+        server_tc: Arc<quinn::TransportConfig>,
+        client_tc: Arc<quinn::TransportConfig>,
+    ) -> (quinn::Connection, quinn::Endpoint, quinn::Endpoint) {
+        let cert = crate::crypto::generate_self_signed_cert().unwrap();
+        let fp = crate::crypto::cert_fingerprint(cert.cert.der().as_ref());
+        let server_sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_addr = server_sock.local_addr().unwrap();
+        let server = build_server_endpoint(server_sock, &cert, server_tc).unwrap();
+        let accept = server.clone();
+        tokio::spawn(async move {
+            while let Some(incoming) = accept.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(c) = incoming.await {
+                        let _ = c.closed().await; // hold it open like run_host does
+                    }
+                });
+            }
+        });
+        let client = build_client_endpoint(
+            std::net::UdpSocket::bind("127.0.0.1:0").unwrap(), fp, client_tc,
+        ).unwrap();
+        let conn = client.connect(server_addr, "minescale").unwrap().await.unwrap();
+        (conn, server, client)
+    }
+
+    /// The bug: an idle connection with no keep-alive is closed by the idle
+    /// timeout ("Join stream error: timed out").
+    #[tokio::test]
+    async fn idle_connection_without_keepalive_times_out() {
+        let tc = || transport_config(Duration::from_millis(800), None);
+        let (conn, _s, _c) = connected_pair(tc(), tc()).await;
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        assert!(conn.close_reason().is_some(), "expected the idle timeout to close it");
+        assert!(conn.open_bi().await.is_err());
+    }
+
+    /// The fix: with a keep-alive well inside the idle timeout, an idle
+    /// connection stays usable for many multiples of that timeout.
+    #[tokio::test]
+    async fn idle_connection_with_keepalive_stays_open() {
+        let tc = || transport_config(Duration::from_millis(800), Some(Duration::from_millis(200)));
+        let (conn, _s, _c) = connected_pair(tc(), tc()).await;
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert!(conn.close_reason().is_none(), "closed: {:?}", conn.close_reason());
+        assert!(conn.open_bi().await.is_ok());
+    }
+
+    #[test]
+    fn production_keepalive_is_well_inside_the_idle_timeout() {
+        assert!(QUIC_KEEP_ALIVE * 2 < QUIC_IDLE_TIMEOUT);
+    }
 }

@@ -114,6 +114,19 @@ cargo test -p mc-share           # ユニットテスト
 経路・ポート）の問題**で、トンネルのロジックではない。そのときは、クライアントの回線から
 `getaddrinfo` の結果（A / AAAA）と、各アドレスへの TCP 接続の可否を別々に確かめる。
 
+### ログファイルを見る
+
+GUI・CLI とも、ログを `mc-share.log` / `mc-share-gui.log` に**即時追記**している（場所は
+[SPEC.md](SPEC.md) の「ログファイル」）。不具合の報告では、まずこのファイルの該当部分を出してもらう。
+新しいログを足すときは `tracing` の `info!` / `warn!` を使えば、画面とファイルの両方に出る。
+
+### マルチキャスト（LAN 一覧）の検証
+
+Python の素のソケットでは、Minecraft の挙動を再現できないことがある（Java は IPv6 のデュアルスタック
+ソケットを使うなど、受信の仕方が違う）。**Minecraft 同梱の Java ランタイム**
+（`<minecraft>/runtime/java-runtime-*/…/bin/java`）で `MulticastSocket(4445)` + `joinGroup(224.0.2.60)` の
+小さなプログラムを動かし、実際に届くかを確かめる。
+
 ### 回線の測定
 
 `nat-scanner/` で、回線の NAT が直接接続に向くかを測れる（外部ポートが接続先ごとに変わるかを見る）。
@@ -157,7 +170,12 @@ cargo test -p mc-share           # ユニットテスト
    あると、全体のタイムアウトが先に切れて、IPv4 を試さずに失敗する。Relay への接続は
    `relay::connect_tcp`（IPv4 優先・時間差で並行）を使う。**テストは、IPv4 のみの回線だけでなく、
    IPv6 付きの回線（携帯のテザリングなど）でも行う。**
-10. **「Connected」は、経路が確定してリスナーが立ってから表示する。** QUIC を試す前に「接続した」と
+10. **QUIC には keep-alive を必ず付ける。** quinn は既定では無通信の接続に何も送らず、idle timeout
+    （30 秒）で閉じる。UDP の NAT マッピングも同じくらいで消える。`QUIC_KEEP_ALIVE`（10 秒）を
+    両端の `TransportConfig` に設定してある。タイムアウトや keep-alive の設定を触ったら、
+    `tunnel::tests` の再現テスト（keep-alive 無し=切れる / 有り=切れない）を通すこと。
+    「繋がった直後は動くが、少し放置すると `timed out`」は、まずこれを疑う。
+11. **「Connected」は、経路が確定してリスナーが立ってから表示する。** QUIC を試す前に「接続した」と
    出すと、Relay に落ちたときに嘘になる。
 
 ## 6. ドキュメントのルール

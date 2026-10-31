@@ -62,11 +62,12 @@ pub async fn announce_lan_world(motd: &str, port: u16, allow_lan: bool) -> Resul
     }
 
     tracing::info!(
-        "Announcing LAN world \"{}\" on multicast {}:{} via {} interface(s) — {}",
+        "Announcing LAN world \"{}\" on multicast {}:{} via {} interface(s) [{}] — {}",
         motd,
         MULTICAST_ADDR,
         MULTICAST_PORT,
         sockets.len(),
+        sockets.iter().map(|(ip, _)| ip.to_string()).collect::<Vec<_>>().join(", "),
         if ttl == 0 { "this computer only" } else { "visible on the local network" },
     );
 

@@ -238,6 +238,8 @@ impl App {
 
         let port_cell = Arc::clone(&self.local_port_cell);
         let transport_cell = Arc::clone(&self.join_transport_cell);
+        let transport_cell_change = Arc::clone(&self.join_transport_cell);
+        let ctx_change = ctx.clone();
         let allow_lan = self.allow_lan;
         let rt   = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
@@ -258,6 +260,10 @@ impl App {
                 })),
                 cancel,
                 allow_lan,
+                on_path_change: Some(Arc::new(move |t| {
+                    if let Ok(mut c) = transport_cell_change.lock() { *c = Some(t); }
+                    ctx_change.request_repaint();
+                })),
                 telemetry: telemetry_enabled,
                 app_kind: mc_share::telemetry::AppKind::Gui,
             };
@@ -296,9 +302,9 @@ impl App {
                 if let Some(p) = *c { self.local_port = p; }
             }
         }
-        if self.join_transport.is_none() {
-            if let Ok(c) = self.join_transport_cell.lock() { self.join_transport = *c; }
-        }
+        // The path can change mid-session (direct tunnel lost -> relay), so
+        // always mirror the cell rather than reading it once.
+        if let Ok(c) = self.join_transport_cell.lock() { self.join_transport = *c; }
     }
 
     // ── UI panels ─────────────────────────────────────────────────────────────

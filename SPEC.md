@@ -184,6 +184,23 @@ CA チェーンを使わず、**フィンガープリントピニング**を採�
 minescale-1
 ```
 
+### QUIC の keep-alive とタイムアウト
+
+```
+keep-alive : 10 秒ごとに PING（無通信のとき）
+idle timeout: 30 秒（相手から何も届かなければ接続を閉じる）
+```
+
+keep-alive が無いと、quinn は無通信の接続に何も送らないため、30 秒無通信で接続が閉じる
+（`Join stream error: timed out`）。UDP の NAT マッピングも無通信 30〜60 秒程度で消えやすい。
+keep-alive でこの両方を防ぐ。
+
+### 直接接続が途中で切れたとき（Join 側）
+
+- 切断を検知した時点で警告を出し、GUI / CLI の経路表示を **Relay** に更新する。
+- 以後の Minecraft の新規接続は Relay を使う（Relay が使える場合）。使えない場合は警告して接続を閉じる。
+- 既に進行中だった Minecraft の接続は失われる（自動の再接続は未実装）。
+
 ### ストリーム多重化
 
 - Minecraft TCP 接続 1 本 = QUIC 双方向ストリーム 1 本
@@ -199,6 +216,24 @@ minescale-1
 | リレー (フォールバック) | **MineScale では暗号化しない** | サーバーが TCP バイト列を平文で転送する。Minecraft 自体のプロトコル保護（オンラインモードの暗号化など）は別問題で、その条件に依存する。将来対応予定 |
 | 鍵交換 | X25519 Diffie-Hellman | エフェメラル鍵。セッションごとに破棄 |
 | セッション鍵導出 | HKDF-SHA256 | 共有秘密から ChaCha20-Poly1305 鍵を導出（将来のリレー暗号化用） |
+
+---
+
+## ログファイル
+
+GUI・CLI とも、ログを**ファイルにも即時に追記**する（1 行ごとに書き込み。クラッシュや
+ウィンドウを閉じた後も残る）。ログはその PC にだけ保存され、送信されない。
+
+| OS | 場所 |
+|----|------|
+| macOS | `~/Library/Logs/MineScale/<app>.log` |
+| Windows | `%LOCALAPPDATA%\MineScale\logs\<app>.log` |
+| Linux | `$XDG_STATE_HOME/minescale/<app>.log`（既定 `~/.local/state/minescale/`） |
+
+`<app>` は `mc-share`（CLI）または `mc-share-gui`。形式は
+`<UTC 時刻> <LEVEL> <target>: <メッセージ> key=value…`。起動ごとに `=== … started ===` の見出しを足す。
+5 MiB を超えていたら、次の起動時に `<app>.log.1`（1 世代）へ退避する。
+ログには外部 IP・部屋 ID などが含まれるので、他人に渡すときは内容を確かめること。
 
 ---
 

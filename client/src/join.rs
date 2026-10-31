@@ -17,6 +17,9 @@ pub struct JoinConfig {
     /// Let other devices on the network see/use the local proxy. Default
     /// off: only this computer can reach the tunnel.
     pub allow_lan: bool,
+    /// Called if the path changes mid-session (the direct tunnel died and
+    /// new connections now go through the relay).
+    pub on_path_change: Option<std::sync::Arc<dyn Fn(Transport) + Send + Sync>>,
     /// Opt-in connection diagnostics. Off by default.
     pub telemetry: bool,
     pub app_kind: telemetry::AppKind,
@@ -32,6 +35,7 @@ impl From<JoinArgs> for JoinConfig {
             on_connected: None,
             cancel: tokio_util::sync::CancellationToken::new(),
             allow_lan: a.allow_lan,
+            on_path_change: Some(std::sync::Arc::new(print_path_change)),
             telemetry: telemetry::enabled(a.telemetry),
             app_kind: telemetry::AppKind::Cli,
         }
@@ -146,6 +150,7 @@ async fn run_inner(
     // and silently mark the entry as offline for the rest of the session.
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
     let allow_lan = config.allow_lan;
+    let on_path_change = config.on_path_change.clone();
     let user_on_connected = config.on_connected.take();
     let report_for_cb = report.clone();
     let on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>> =
@@ -177,7 +182,7 @@ async fn run_inner(
     tokio::select! {
         r = tunnel::run_join(
             udp_socket, host_addr, cert_fingerprint, local_addr,
-            relay_fallback, allow_lan, on_connected,
+            relay_fallback, allow_lan, on_connected, on_path_change,
         ) => r?,
         _ = cancel.cancelled() => {}
     }
@@ -211,6 +216,13 @@ fn classify_error(msg: &str) -> telemetry::Outcome {
 fn short(msg: &str) -> &str {
     let line = msg.lines().next().unwrap_or("");
     if line.len() <= 120 { line } else { &line[..120] }
+}
+
+fn print_path_change(t: Transport) {
+    println!();
+    println!("  Direct connection lost — now using: {}", t.label());
+    println!("  {}", t.detail());
+    println!();
 }
 
 fn print_connected(port: u16, transport: Transport) {

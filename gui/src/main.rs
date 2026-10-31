@@ -31,9 +31,16 @@ fn main() -> eframe::Result<()> {
 
     // Wire tracing → GUI log.  All info!/warn!/error! calls in client code
     // will appear in the log panel automatically.
+    // The same lines are also appended to a log file as they happen, so they
+    // survive a crash or a closed window.
+    let file_log = mc_share::logfile::FileLog::open("mc-share-gui", env!("CARGO_PKG_VERSION"));
     tracing_subscriber::registry()
         .with(GuiLayer(Arc::clone(&log)))
+        .with(file_log.clone().map(|f| mc_share::logfile::FileLayer::new(f, true)))
         .init();
+    if let Some(f) = &file_log {
+        tracing::info!("Log file: {}", f.path().display());
+    }
 
     let rt = Arc::new(
         tokio::runtime::Builder::new_multi_thread()

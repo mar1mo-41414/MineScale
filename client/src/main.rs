@@ -5,6 +5,7 @@ mod diag;
 mod host;
 mod join;
 mod lan;
+mod logfile;
 mod relay;
 mod stun;
 mod telemetry;
@@ -17,13 +18,23 @@ use cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("mc_share=info".parse()?),
-        )
-        .without_time()
-        .init();
+    // Console output, plus the same lines appended to a log file the moment
+    // they happen (see logfile.rs for where it lives).
+    let file_log = logfile::FileLog::open("mc-share", env!("CARGO_PKG_VERSION"));
+    {
+        use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::from_default_env()
+                    .add_directive("mc_share=info".parse()?),
+            )
+            .with(tracing_subscriber::fmt::layer().without_time())
+            .with(file_log.clone().map(|f| logfile::FileLayer::new(f, false)))
+            .init();
+    }
+    if let Some(f) = &file_log {
+        tracing::info!("Log file: {}", f.path().display());
+    }
 
     let cli = Cli::parse();
 
