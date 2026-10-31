@@ -129,6 +129,22 @@ Minecraft は、ホストが認証を求めたとき、ジョイン側が自分�
 直接アドレスの入力でも入れますが、上の「無効なセッション」の項のとおり、**アカウントによっては
 直接入力だと入れません**。一覧に出すための確認事項です。
 
+**まず、MineScale を切り離して、Minecraft の画面に出るかを確かめます。**
+同梱のスクリプト `scripts/lan-announce-test.py`（Python 3 だけで動く）が、LAN ワールドと同じ
+アナウンスだけを送ります。
+
+```bash
+python3 scripts/lan-announce-test.py            # 約 60 秒、「LAN-TEST」という名前で送る
+```
+
+動かしたまま、Minecraft のマルチプレイ画面を開いて、**「LAN-TEST」が出るか**を見てください。
+
+- **出る** → Minecraft と OS は問題ありません。MineScale のアナウンス（ログの
+  `Announcing LAN world … [インターフェイスの IP]`）の出し方に原因があります。
+- **出ない** → MineScale は無関係で、OS と Minecraft の間（ローカルネットワークの許可、VPN、
+  ファイアウォール、Minecraft を起動するアプリの権限）に原因があります。
+  `--ttl 0` や `--no-iface` も試してください。
+
 - **macOS: 「ローカルネットワーク」の許可**を確認する。システム設定 → プライバシーとセキュリティ →
   ローカルネットワーク で、**Minecraft を起動しているアプリ（Prism Launcher / Minecraft など）**と
   **MineScale** がオンになっているか。オフだと、マルチキャスト（LAN 検出）を受信・送信できません。

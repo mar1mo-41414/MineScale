@@ -153,6 +153,9 @@ Python の素のソケットでは、Minecraft の挙動を再現できないこ
 ソケットを使うなど、受信の仕方が違う）。**Minecraft 同梱の Java ランタイム**
 （`<minecraft>/runtime/java-runtime-*/…/bin/java`）で `MulticastSocket(4445)` + `joinGroup(224.0.2.60)` の
 小さなプログラムを動かし、実際に届くかを確かめる。
+MineScale を切り離して、実際の Minecraft の画面に出るかを見るには、`scripts/lan-announce-test.py`
+（偽のアナウンスだけを送る。標準ライブラリのみ）を使う。ターミナルで受信できても、ランチャーから
+起動した Minecraft では出ない、という差が実際にあり得る（アプリの権限の文脈が違う）。
 
 ### 回線の測定
 
