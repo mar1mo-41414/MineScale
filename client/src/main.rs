@@ -8,6 +8,7 @@ mod lan;
 mod relay;
 mod stun;
 mod telemetry;
+mod transport;
 mod tunnel;
 
 use anyhow::Result;

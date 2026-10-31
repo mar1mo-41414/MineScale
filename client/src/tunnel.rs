@@ -8,6 +8,8 @@
 use anyhow::{anyhow, Result};
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::net::UdpSocket;
+
+use crate::transport::Transport;
 use tracing::{debug, info, warn};
 
 // ── Hole punching ─────────────────────────────────────────────────────────────
@@ -390,16 +392,15 @@ pub struct RelayFallback {
 ///
 /// `on_connected` fires once when the local TCP listener is bound AND a
 /// usable transport (QUIC or relay) is selected — i.e. when it is safe
-/// for Minecraft to connect. `on_transport` is informational, used by
-/// telemetry to record which path was chosen.
+/// for Minecraft to connect. It receives the bound port and the chosen
+/// transport.
 pub async fn run_join(
     socket: UdpSocket,
     host_addr: SocketAddr,
     cert_fingerprint: Vec<u8>,
     local_addr: SocketAddr,
     relay_fallback: Option<RelayFallback>,
-    on_connected: Option<Box<dyn FnOnce(u16) + Send>>,
-    on_transport: Option<Box<dyn FnOnce(&str) + Send>>,
+    on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>>,
 ) -> Result<()> {
     const QUIC_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
@@ -431,29 +432,28 @@ pub async fn run_join(
     };
 
     let mode = match (&quic_conn, &relay_fallback) {
-        (Some(_), _) => "quic",
+        (Some(_), _) => Transport::Quic,
         (None, Some(_)) => {
             info!("Falling back to relay");
-            "relay"
+            Transport::Relay
         }
         (None, None) => {
             return Err(anyhow!("QUIC failed and no relay fallback available"));
         }
     };
-    if let Some(cb) = on_transport { cb(mode); }
 
     let listener = tokio::net::TcpListener::bind(local_addr).await?;
     let bound_port = listener.local_addr()?.port();
-    info!("Minecraft proxy ready on 0.0.0.0:{} (transport={})", bound_port, mode);
+    info!("Minecraft proxy ready on 0.0.0.0:{} (transport={})", bound_port, mode.as_str());
 
     if let Some(cb) = on_connected {
-        cb(bound_port);
+        cb(bound_port, mode);
     }
 
     loop {
         match listener.accept().await {
             Ok((tcp_stream, peer)) => {
-                info!("Minecraft client connected from {} (transport={})", peer, mode);
+                info!("Minecraft client connected from {} (transport={})", peer, mode.as_str());
                 match &quic_conn {
                     Some(conn) => {
                         let conn = conn.clone();

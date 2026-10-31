@@ -1,5 +1,6 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, Ui};
 use mc_share::{
+    transport::Transport,
     diag::{DiagResult, NatType},
     host::{run_with_config as host_run, HostConfig},
     join::{run_with_config as join_run, JoinConfig},
@@ -10,6 +11,14 @@ use tracing_subscriber::Layer;
 
 const DEFAULT_COORD: &str = "https://mcs.markund.f5.si";
 const DEFAULT_STUN:  &str = "stun.l.google.com:19302";
+
+/// Green for a direct tunnel, amber for the relay (a heads-up, not an error).
+fn path_color(t: Transport) -> Color32 {
+    match t {
+        Transport::Quic  => Color32::from_rgb(100, 220, 100),
+        Transport::Relay => Color32::from_rgb(255, 190, 70),
+    }
+}
 
 // ── Tracing → GUI log layer ───────────────────────────────────────────────────
 
@@ -88,10 +97,15 @@ pub struct App {
     // ── outputs (set by background callbacks) ────────────────────────────────
     share_url_cell:  Arc<Mutex<Option<String>>>,
     local_port_cell: Arc<Mutex<Option<u16>>>,
+    /// Join: path chosen for this session (direct QUIC or relay).
+    join_transport_cell: Arc<Mutex<Option<Transport>>>,
+    /// Host: paths friends have arrived on so far.
+    host_paths_cell: Arc<Mutex<Vec<Transport>>>,
 
     // ── derived: updated in update() once cells are populated ────────────────
     share_url:  String,
     local_port: u16,
+    join_transport: Option<Transport>,
 
     /// When the host room expires (15 min after share URL appears).
     room_expires_at: Option<std::time::Instant>,
@@ -132,8 +146,11 @@ impl App {
             share_input: String::new(),
             share_url_cell:  Arc::new(Mutex::new(None)),
             local_port_cell: Arc::new(Mutex::new(None)),
+            join_transport_cell: Arc::new(Mutex::new(None)),
+            host_paths_cell: Arc::new(Mutex::new(Vec::new())),
             share_url:  String::new(),
             local_port: 0,
+            join_transport: None,
             room_expires_at: None,
             diag_result:  Arc::new(Mutex::new(None)),
             diag_running: false,
@@ -154,9 +171,12 @@ impl App {
     fn reset_outputs(&mut self) {
         self.share_url       = String::new();
         self.local_port      = 0;
+        self.join_transport  = None;
         self.room_expires_at = None;
         if let Ok(mut c) = self.share_url_cell.lock()  { *c = None; }
         if let Ok(mut c) = self.local_port_cell.lock() { *c = None; }
+        if let Ok(mut c) = self.join_transport_cell.lock() { *c = None; }
+        if let Ok(mut c) = self.host_paths_cell.lock()     { c.clear(); }
     }
 
     // ── Start / stop ──────────────────────────────────────────────────────────
@@ -173,6 +193,8 @@ impl App {
         let rt  = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
         let telemetry_enabled = self.telemetry_enabled;
+        let paths_cell = Arc::clone(&self.host_paths_cell);
+        let ctx_paths = ctx.clone();
 
         rt.spawn(async move {
             tracing::info!("Starting host…");
@@ -184,6 +206,10 @@ impl App {
                 stun_server: DEFAULT_STUN.into(),
                 on_share_url: Some(Box::new(move |url| {
                     if let Ok(mut c) = share_cell.lock() { *c = Some(url); }
+                })),
+                on_peer_path: Some(Arc::new(move |t| {
+                    if let Ok(mut v) = paths_cell.lock() { v.push(t); }
+                    ctx_paths.request_repaint();
                 })),
                 cancel,
                 telemetry: telemetry_enabled,
@@ -208,6 +234,7 @@ impl App {
         self.state     = RunState::Running;
 
         let port_cell = Arc::clone(&self.local_port_cell);
+        let transport_cell = Arc::clone(&self.join_transport_cell);
         let rt   = Arc::clone(&self.rt);
         let ctx2 = ctx.clone();
         let telemetry_enabled = self.telemetry_enabled;
@@ -221,7 +248,8 @@ impl App {
                 local_port,
                 coord_url,
                 stun_server: DEFAULT_STUN.into(),
-                on_connected: Some(Box::new(move |port| {
+                on_connected: Some(Box::new(move |port, transport| {
+                    if let Ok(mut c) = transport_cell.lock() { *c = Some(transport); }
                     if let Ok(mut c) = port_cell.lock() { *c = Some(port); }
                 })),
                 cancel,
@@ -262,6 +290,9 @@ impl App {
             if let Ok(c) = self.local_port_cell.lock() {
                 if let Some(p) = *c { self.local_port = p; }
             }
+        }
+        if self.join_transport.is_none() {
+            if let Ok(c) = self.join_transport_cell.lock() { self.join_transport = *c; }
         }
     }
 
@@ -314,6 +345,16 @@ impl App {
                 }
             });
             ui.small("Multiple friends can join with the same link.");
+
+            // ── Which path friends arrived on ────────────────────────────────
+            let paths: Vec<Transport> = self.host_paths_cell
+                .lock().map(|v| v.clone()).unwrap_or_default();
+            for t in paths {
+                ui.add_space(2.0);
+                ui.colored_label(path_color(t), format!("●  Friend connected — {}", t.label()));
+                ui.label(RichText::new(format!("    {}", t.detail()))
+                    .color(Color32::GRAY).size(12.0));
+            }
 
             // ── Room expiry countdown ────────────────────────────────────────
             if let Some(expires_at) = self.room_expires_at {
@@ -392,6 +433,11 @@ impl App {
                     ui.add_space(6.0);
                     ui.colored_label(Color32::from_rgb(100, 220, 100),
                         "✓  Connected! Open Minecraft → Multiplayer.");
+                    if let Some(t) = self.join_transport {
+                        ui.colored_label(path_color(t), format!("Path: {}", t.label()));
+                        ui.label(RichText::new(format!("  {}", t.detail()))
+                            .color(Color32::GRAY).size(12.0));
+                    }
                     ui.label(RichText::new(
                         "  If the world doesn't appear or refuses to join,\n  \
                          use \"Add Server\" with the direct address below:"

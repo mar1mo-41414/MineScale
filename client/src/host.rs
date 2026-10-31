@@ -1,4 +1,4 @@
-use crate::{cli::HostArgs, coord, crypto, diag, lan, relay, stun, telemetry, tunnel};
+use crate::{cli::HostArgs, coord, crypto, diag, lan, relay, stun, telemetry, transport::Transport, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use std::time::Duration;
@@ -12,6 +12,9 @@ pub struct HostConfig {
     pub stun_server: String,
     /// Called once when the share URL is ready (e.g. to show it in a GUI).
     pub on_share_url: Option<Box<dyn FnOnce(String) + Send>>,
+    /// Called the first time a friend actually reaches us over each path
+    /// (at most once for `Quic`, at most once for `Relay`).
+    pub on_peer_path: Option<std::sync::Arc<dyn Fn(Transport) + Send + Sync>>,
     /// Signals cancellation.  Drop the sender to cancel.
     pub cancel: tokio_util::sync::CancellationToken,
     /// Opt-in connection diagnostics. Off by default.
@@ -27,6 +30,7 @@ impl From<HostArgs> for HostConfig {
             coord_url: a.coord_url,
             stun_server: a.stun_server,
             on_share_url: None,
+            on_peer_path: Some(std::sync::Arc::new(print_peer_path)),
             cancel: tokio_util::sync::CancellationToken::new(),
             telemetry: telemetry::enabled(a.telemetry),
             app_kind: telemetry::AppKind::Cli,
@@ -123,7 +127,7 @@ async fn run_inner(
     // ── 7. Start QUIC server + relay park pool ────────────────────────────────
     let mc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", mc_port).parse()?;
     info!("Forwarding to Minecraft at {}", mc_addr);
-    println!("\n  Friend connected! Tunnelling to 127.0.0.1:{} …\n", mc_port);
+    println!("\n  A friend is joining — setting up the tunnel to 127.0.0.1:{} …", mc_port);
     println!("  (The same link can be shared with more friends)\n");
 
     // The `Connected` checkpoint should fire only when a joiner has
@@ -133,13 +137,28 @@ async fn run_inner(
     let report_for_quic = report.clone();
     let report_for_relay = report.clone();
 
+    // Tell the UI which path a friend arrived on — once per path, so the
+    // many short relay sessions Minecraft opens don't spam it.
+    let seen_quic  = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen_relay = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let on_peer_path = config.on_peer_path.clone();
+    let notify_path = move |t: Transport| {
+        let seen = if t == Transport::Quic { &seen_quic } else { &seen_relay };
+        if !seen.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if let Some(cb) = &on_peer_path { cb(t); }
+        }
+    };
+    let notify_path = std::sync::Arc::new(notify_path);
+
     let on_quic_connect: Box<dyn Fn() + Send + Sync> = {
         let cf = connected_flag.clone();
+        let notify = notify_path.clone();
         Box::new(move || {
+            notify(Transport::Quic);
             if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 let r = report_for_quic.clone();
                 tokio::spawn(async move {
-                    r.set_transport("quic");
+                    r.set_transport(Transport::Quic.as_str());
                     r.send_event(telemetry::Phase::Connected).await;
                 });
             }
@@ -162,6 +181,7 @@ async fn run_inner(
     let cancel = config.cancel.clone();
     if let Ok(relay_addr) = relay::parse_relay_addr(&room.relay_addr) {
         let cf = connected_flag.clone();
+        let notify_relay = notify_path.clone();
         let report_relay = report_for_relay.clone();
         let room_id = room.room_id.clone();
         let token = room.relay_token.clone();
@@ -189,10 +209,11 @@ async fn run_inner(
                 4,
                 combined,
                 move || {
+                    notify_relay(Transport::Relay);
                     if !cf.swap(true, std::sync::atomic::Ordering::Relaxed) {
                         let r = report_relay.clone();
                         tokio::spawn(async move {
-                            r.set_transport("relay");
+                            r.set_transport(Transport::Relay.as_str());
                             r.send_event(telemetry::Phase::Connected).await;
                         });
                     }
@@ -313,6 +334,11 @@ fn short(msg: &str) -> &str {
     // printed by our error types, so this is safe to forward.
     let line = msg.lines().next().unwrap_or("");
     if line.len() <= 120 { line } else { &line[..120] }
+}
+
+fn print_peer_path(t: Transport) {
+    println!("  Friend connected — {}", t.label());
+    println!("  {}\n", t.detail());
 }
 
 fn print_share_link(url: &str) {

@@ -1,7 +1,6 @@
-use crate::{cli::JoinArgs, coord, crypto, diag, lan, relay, stun, telemetry, tunnel};
+use crate::{cli::JoinArgs, coord, crypto, diag, lan, relay, stun, telemetry, transport::Transport, tunnel};
 use anyhow::Result;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use std::time::Duration;
 use tracing::info;
 
 // ── Public config ─────────────────────────────────────────────────────────────
@@ -11,8 +10,9 @@ pub struct JoinConfig {
     pub local_port: u16,
     pub coord_url: String,
     pub stun_server: String,
-    /// Called once with the local proxy port when the tunnel is ready.
-    pub on_connected: Option<Box<dyn FnOnce(u16) + Send>>,
+    /// Called once the tunnel is usable, with the local proxy port and the
+    /// path actually chosen (direct QUIC or relay).
+    pub on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>>,
     pub cancel: tokio_util::sync::CancellationToken,
     /// Opt-in connection diagnostics. Off by default.
     pub telemetry: bool,
@@ -102,8 +102,6 @@ async fn run_inner(
     let local_port = resolve_local_port(config.local_port).await?;
     let local_addr: std::net::SocketAddr = format!("0.0.0.0:{}", local_port).parse()?;
 
-    print_connected(local_port);
-
     // ── 6. QUIC tunnel (with relay fallback) ──────────────────────────────────
     // on_connected fires INSIDE run_join, after a usable transport is selected
     // (QUIC or relay) AND the local TCP listener is bound — guaranteeing
@@ -119,19 +117,17 @@ async fn run_inner(
     let cert_fingerprint = STANDARD.decode(&room.cert_fingerprint)?;
     let user_on_connected = config.on_connected.take();
     let report_for_cb = report.clone();
-    let on_connected: Option<Box<dyn FnOnce(u16) + Send>> =
-        Some(Box::new(move |port: u16| {
+    let on_connected: Option<Box<dyn FnOnce(u16, Transport) + Send>> =
+        Some(Box::new(move |port: u16, transport: Transport| {
+            // Print the banner only now: the path (direct vs relay) is
+            // known, and the listener is really up.
+            print_connected(port, transport);
+            report_for_cb.set_transport(transport.as_str());
             tokio::spawn(lan::announce_lan_world("MineScale World", port));
-            if let Some(cb) = user_on_connected { cb(port); }
+            if let Some(cb) = user_on_connected { cb(port, transport); }
             tokio::spawn(async move {
                 report_for_cb.send_event(telemetry::Phase::Connected).await;
             });
-        }));
-
-    let report_for_transport = report.clone();
-    let on_transport: Option<Box<dyn FnOnce(&str) + Send>> =
-        Some(Box::new(move |t: &str| {
-            report_for_transport.set_transport(t);
         }));
 
     let relay_fallback = relay::parse_relay_addr(&room.relay_addr).ok().map(|addr| {
@@ -150,7 +146,7 @@ async fn run_inner(
     tokio::select! {
         r = tunnel::run_join(
             udp_socket, host_addr, cert_fingerprint, local_addr,
-            relay_fallback, on_connected, on_transport,
+            relay_fallback, on_connected,
         ) => r?,
         _ = cancel.cancelled() => {}
     }
@@ -186,17 +182,13 @@ fn short(msg: &str) -> &str {
     if line.len() <= 120 { line } else { &line[..120] }
 }
 
-fn print_connected(port: u16) {
+fn print_connected(port: u16, transport: Transport) {
     println!();
-    println!("  ┌──────────────────────────────────────────────────────────┐");
-    println!("  │  Connected!                                               │");
-    println!("  │                                                            │");
-    println!("  │  Open Minecraft → Multiplayer.                            │");
-    println!("  │  The world should appear automatically in the list.       │");
-    println!("  │                                                            │");
-    println!("  │  If it doesn't appear or refuses to let you join,         │");
-    println!("  │  use \"Add Server\" → direct address below:                 │");
-    println!("  │      127.0.0.1:{}                                       │", port);
-    println!("  └──────────────────────────────────────────────────────────┘");
+    println!("  Connected — {}", transport.label());
+    println!("  {}", transport.detail());
+    println!();
+    println!("  Open Minecraft → Multiplayer. The world should appear in the list.");
+    println!("  If it doesn't appear, use \"Add Server\" with this address:");
+    println!("      127.0.0.1:{}", port);
     println!();
 }

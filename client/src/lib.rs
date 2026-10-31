@@ -8,4 +8,5 @@ pub mod lan;
 pub mod relay;
 pub mod stun;
 pub mod telemetry;
+pub mod transport;
 pub mod tunnel;

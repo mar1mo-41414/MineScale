@@ -4,7 +4,7 @@
 
 mod app;
 
-use app::{GuiLayer, LogEntry, LogLevel};
+use app::{GuiLayer, LogEntry};
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

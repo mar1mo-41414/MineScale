@@ -35,7 +35,10 @@ pub struct HostArgs {
 
     /// Send anonymous connection diagnostics to the coordination server.
     /// Off by default. See README ("接続調査への協力について") for what is collected.
-    #[arg(long, env = "MC_SHARE_TELEMETRY", default_value_t = false)]
+    // The MC_SHARE_TELEMETRY env var is read by telemetry::enabled() (which
+    // accepts 1/true/yes/on). Don't also bind it here via clap's `env`: clap
+    // parses that as a strict bool and rejects "1", aborting the whole CLI.
+    #[arg(long, default_value_t = false)]
     pub telemetry: bool,
 }
 
@@ -58,6 +61,9 @@ pub struct JoinArgs {
 
     /// Send anonymous connection diagnostics to the coordination server.
     /// Off by default. See README ("接続調査への協力について") for what is collected.
-    #[arg(long, env = "MC_SHARE_TELEMETRY", default_value_t = false)]
+    // The MC_SHARE_TELEMETRY env var is read by telemetry::enabled() (which
+    // accepts 1/true/yes/on). Don't also bind it here via clap's `env`: clap
+    // parses that as a strict bool and rejects "1", aborting the whole CLI.
+    #[arg(long, default_value_t = false)]
     pub telemetry: bool,
 }
